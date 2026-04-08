@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Prevent number inputs from showing spinners in register fields */
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+@layer components {
+  /* Ensure minimum 44px touch targets on all interactive elements */
+  .touch-target {
+    @apply min-h-[44px] min-w-[44px] flex items-center justify-center;
+  }
+}
+
+@layer utilities {
+  /* Void row strikethrough — applied via statusRowClass() */
+  .line-through-all * {
+    text-decoration: line-through;
+  }
+
+  /* Tabular numbers for all currency display */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
