@@ -1,0 +1,897 @@
+# Digital Check Register — Complete Technical Specification
+**Version:** 1.0  
+**Status:** Build-Ready  
+**Last Updated:** April 2026  
+
+---
+
+## Table of Contents
+
+1. [Product Philosophy](#1-product-philosophy)
+2. [Core Principles](#2-core-principles)
+3. [User Authentication & Security](#3-user-authentication--security)
+4. [Account Management](#4-account-management)
+5. [Register Structure](#5-register-structure)
+6. [Column Definitions](#6-column-definitions)
+7. [Status System](#7-status-system)
+8. [Balance Model](#8-balance-model)
+9. [Formula Definitions](#9-formula-definitions)
+10. [Status Transition Rules](#10-status-transition-rules)
+11. [Monthly Register Rules](#11-monthly-register-rules)
+12. [Locked Month & Audit Log](#12-locked-month--audit-log)
+13. [Reconciliation System](#13-reconciliation-system)
+14. [AI Layer](#14-ai-layer)
+15. [Data Schema](#15-data-schema)
+16. [UI Specification](#16-ui-specification)
+17. [Validation Rules](#17-validation-rules)
+18. [Bank Sync (Optional — v2)](#18-bank-sync-optional--v2)
+19. [Tech Stack Recommendation](#19-tech-stack-recommendation)
+20. [Build Phases](#20-build-phases)
+
+---
+
+## 1. Product Philosophy
+
+This application is a **ledger-first digital check register**. It is not a budgeting app, not a bank dashboard, and not an AI financial advisor.
+
+> **The bank is not the source of truth. The user's ledger is.**
+
+Bank data is secondary and used exclusively for reconciliation — to confirm what the user already knows, not to tell the user what is true.
+
+### What This App Solves
+
+Consumers have no trustworthy way to know their real checking account balance at any given moment because:
+
+- Banks mix posted and pending transactions inconsistently
+- Banks do not know about scheduled or pre-planned payments
+- Existing apps treat bank data as the source of truth
+- "Available Balance" shown by banks is optimistic and frequently causes overdrafts
+
+### What This App Is
+
+- A rigorous, auditable, month-by-month digital check register
+- A system where the user records transactions based on intent and knowledge
+- A tool where AI assists with reconciliation but never makes decisions
+- A platform where every balance is honest, transparent, and explainable
+
+---
+
+## 2. Core Principles
+
+1. **Ledger-first.** User-entered data is always authoritative. Bank data never overwrites it.
+2. **Nothing changes silently.** No automatic status changes without user knowledge. AI suggests; user confirms.
+3. **Every balance is explainable.** The gap between any two balances is always visible and describable.
+4. **History is immutable.** Past months are locked. Edits require explicit unlock and are permanently logged.
+5. **Committed money is not available money.** Scheduled payments deduct from Available Balance immediately upon entry.
+6. **AI is an assistant, not a decision-maker.** Ever.
+
+---
+
+## 3. User Authentication & Security
+
+### Login Requirements
+- Secure email + password authentication
+- Multi-factor authentication (MFA) required — TOTP or SMS
+- Session timeout after inactivity (configurable, default 15 minutes)
+- Password requirements: minimum 12 characters, mixed case, numbers, symbols
+
+### Data Security
+- All data encrypted at rest (AES-256)
+- All data encrypted in transit (TLS 1.3)
+- Routing numbers: encrypted at rest, masked in UI (`••••••102`), revealed only on explicit user action
+- Account numbers: encrypted at rest, masked in UI (`••••3106`), revealed only on explicit user action
+- Routing and account numbers stored ONLY in account settings — never displayed in the register header
+- Audit log is append-only — no entry is ever modified or deleted, including by the user
+- IP address logged (encrypted) on all sensitive actions
+
+### Auth Stack (Recommended)
+- Supabase Auth or Auth0 for authentication layer
+- Row-Level Security (RLS) — every user sees only their own data
+- JWT tokens with short expiry + refresh token rotation
+
+---
+
+## 4. Account Management
+
+Users can manage one or more bank accounts. Each account has its own independent register system.
+
+### Account Fields
+
+| Field | Type | Constraints |
+|---|---|---|
+| `id` | UUID | Auto-generated, primary key |
+| `user_id` | UUID | Foreign key to user |
+| `nickname` | String | Required, e.g. "TD Bank — Main Checking" |
+| `bank_name` | String | Required |
+| `account_type` | Enum | `checking` or `savings` |
+| `routing_number` | Encrypted String | 9 digits exactly |
+| `account_number` | Encrypted String | 8–17 digits |
+| `is_active` | Boolean | Soft delete — never hard delete |
+| `created_at` | Timestamp | Immutable |
+| `updated_at` | Timestamp | Auto-updated |
+
+### CRUD Rules
+- **Create:** User can add multiple accounts
+- **Read:** Account details masked by default; full reveal requires user action
+- **Update:** All fields editable except `id` and `created_at`
+- **Delete:** Soft delete only (`is_active = false`) — historical registers are preserved permanently
+
+---
+
+## 5. Register Structure
+
+### Monthly Organization
+- Each calendar month has exactly one register per account
+- Registers are identified by `account_id` + `month` + `year`
+- One register is displayed at a time
+- Navigation: previous/next month arrows + month tab bar (January–December + Yearly Summary)
+
+### Opening Balance
+- January of each year: user sets the opening balance manually (once, at account creation or year start)
+- February–December: opening balance = prior month's closing balance — **read-only, auto-carried, never editable**
+- Opening balance is stored as `register.opening_balance`
+
+### Closing Balance
+- The running balance of the last non-void transaction row in the register
+- Automatically becomes the next month's opening balance
+
+### Yearly Summary
+- A derived, read-only view across all 12 monthly registers
+- No manual input ever accepted
+- Displays monthly opening/closing balances, total debits, total credits, net change per month
+
+---
+
+## 6. Column Definitions
+
+### Header Row (Non-Editable)
+
+| Cell | Label | Value | Type | Rules |
+|---|---|---|---|---|
+| B1/B2 | — | `Check Register — [Month] [YYYY]` | Auto-generated | Derived from active register month/year |
+| F1 | `Current Balance:` | — | Label only | Static |
+| F2 | `Available Balance:` | — | Label only | Static |
+| G1 | — | Current Balance value | Decimal(2) | User-entered during reconciliation; see Formula A |
+| G2 | — | Available Balance value | Decimal(2) | User-entered during reconciliation; see Formula B |
+| H1 | `Actual Balance:` | — | Label only | Static |
+| H2 | — | Actual/Ledger Balance | Decimal(2) | **COMPUTED — never editable**; see Formula C |
+
+> Note: Routing number and account number are displayed in **Account Settings only**, not in the register header.
+
+### Transaction Row (Editable)
+
+| Column | Label | Type | Required | Constraints |
+|---|---|---|---|---|
+| B | Check # | Integer | No | Positive integers only; optional |
+| C | Date | Date | Yes | Format: MM/DD/YYYY; future dates allowed |
+| D | Description of Transaction | String | Yes | Free text; max 255 characters |
+| E | Register Status | Enum (icon) | Auto/User | See Status System section; icons only |
+| F | Debit (–) | Decimal(2) | Conditional | Positive numbers only; mutually exclusive with G |
+| G | Credit (+) | Decimal(2) | Conditional | Positive numbers only; mutually exclusive with F |
+| H | Balance | Decimal(2) | — | **COMPUTED — never stored, never editable** |
+| I | Notes / Memos | String | No | Free text; triggers scheduled status auto-rule |
+
+---
+
+## 7. Status System
+
+Every transaction row has exactly one status at any time. Status is displayed in Column E as an icon.
+
+### Status Definitions
+
+| Status | Icon | Color | Source | Meaning |
+|---|---|---|---|---|
+| `recorded` | *(blank)* | — | User entry | Row has debit or credit entered; not yet synced with bank |
+| `scheduled` | `scheduled.svg` | Red ❗ | **Automatic** | Notes/Memos contains "Scheduled to be paid on"; see auto-trigger rule |
+| `in_flight` | `scheduled.svg` | Red ❗ + amber row tint | **Automatic** | Scheduled date has passed; awaiting bank confirmation |
+| `pending` | `pending.svg` | Yellow ⚠️ | User action (AI may suggest) | Bank reports transaction as in-process / incoming |
+| `cleared` | `cleared.svg` | Green ✅ | User action (AI may suggest) | Bank has fully posted and settled the transaction |
+| `void` | *(struck through)* | Gray | User action | Transaction cancelled; excluded from all calculations |
+
+### Icon Files
+- `cleared.ico` → convert to `cleared.svg` (green checkmark)
+- `pending.ico` → convert to `pending.svg` (yellow exclamation)
+- `scheduled.ico` → convert to `scheduled.svg` (red exclamation)
+
+> All icons must be converted from `.ico` to `.svg` for cross-browser compatibility and retina display sharpness.
+
+### Mutual Exclusivity — Debit and Credit
+- A transaction row can have a **debit OR a credit — never both**
+- If debit has a value: credit field is disabled for that row
+- If credit has a value: debit field is disabled for that row
+- If user attempts to enter both simultaneously, display inline message:
+  > *"A transaction can only be a debit or a credit — not both. Please enter one or the other."*
+- Real-time field disabling prevents the error before it occurs
+
+---
+
+## 8. Balance Model
+
+### The Two Computations
+
+There are exactly **two distinct balance computations**. Three labels are used in the UI, but two of them (Current Balance and Actual Balance) produce the same number from the same formula.
+
+#### Computation A — Ledger Balance
+```
+ledger_balance = opening_balance
+               + SUM(all credits where status ≠ void)
+               - SUM(all debits where status ≠ void)
+```
+Used for:
+- **Current Balance** (G1) — the bank-side reconciliation target label
+- **Actual Balance** (H2) — the ledger-side source of truth label
+- These are always the same number
+
+#### Computation B — Available Balance
+```
+available_balance = opening_balance
+                  + SUM(credits where status = 'cleared')
+                  - SUM(debits where status = 'cleared')
+```
+Used for:
+- **Available Balance** (G2) — what the bank thinks the user can spend
+
+### Why Three Labels for Two Computations
+
+| Label | Axis | Purpose |
+|---|---|---|
+| **Current Balance** | Bank | Reconciliation target — should match bank's "Current" after reconciliation |
+| **Available Balance** | Bank | Reconciliation target — should match bank's "Available" after reconciliation |
+| **Actual Balance** | Ledger | Source of truth — what the user can truly spend right now |
+
+The bank's "Available Balance" is optimistic — it does not know about scheduled payments, pre-planned debits, or user-entered transactions. The **Actual Balance** corrects this by including everything the user knows about.
+
+### The Convergence Principle
+
+In a perfect reconciliation state:
+- Every transaction is cleared ✅
+- No pending ⚠️ transactions exist
+- No scheduled ❗ transactions exist
+- No unsynced `recorded` entries exist
+
+**Result: Current Balance = Available Balance = Actual Balance**
+
+This is the system's "green light" state — all three numbers match.
+
+### The Divergence Diagnostic
+
+| Gap | Meaning |
+|---|---|
+| `Current Balance` ≠ `Available Balance` | Pending holds the bank is processing |
+| `Available Balance` ≠ `Actual Balance` | Scheduled/unsynced commitments bank doesn't know about yet |
+| All three differ | Full reconciliation needed |
+| All three equal | ✅ Fully reconciled |
+
+---
+
+## 9. Formula Definitions
+
+### Formula A — Current Balance (G1)
+```
+current_balance = opening_balance
+                + SUM(all credits, status ≠ void)
+                - SUM(all debits, status ≠ void)
+```
+Includes: cleared, pending, scheduled, in_flight, recorded  
+Excludes: void  
+Reconciliation target: must match bank's "Current Balance" after reconciliation
+
+### Formula B — Available Balance (G2)
+```
+available_balance = opening_balance
+                  + SUM(credits where status = 'cleared')
+                  - SUM(debits where status = 'cleared')
+```
+Includes: cleared only  
+Excludes: pending, scheduled, in_flight, recorded, void  
+Reconciliation target: must match bank's "Available Balance" after reconciliation
+
+### Formula C — Actual Balance / Register Balance (H2)
+```
+actual_balance = last_transaction_row.balance
+               = opening_balance
+               + SUM(all credits, status ≠ void)
+               - SUM(all debits, status ≠ void)
+```
+This is identical to Formula A. The distinction is context:
+- Formula A is used in the header as the bank-side reconciliation label
+- Formula C is the running ledger balance — the user's true source of truth
+
+### Formula D — Running Balance (Column H, per row)
+```
+row.balance = opening_balance
+            + SUM(credit column, row 1 through current row, status ≠ void)
+            - SUM(debit column, row 1 through current row, status ≠ void)
+```
+Rules:
+- If row has neither debit nor credit: balance cell is blank
+- Always includes opening balance — every row shows a true account balance
+- **Never stored in the database** — always computed on read
+- Void rows do not affect the running balance of subsequent rows
+
+### Formula E — Monthly Carry-Forward (Normalized)
+```
+current_month.opening_balance = prior_month.last_transaction_row.balance
+```
+One rule. Every month. No exceptions.  
+January: opening balance set manually by user at account/year initialization  
+February–December: opening balance = prior month closing balance, read-only, auto-carried
+
+---
+
+## 10. Status Transition Rules
+
+### Complete Transition Map
+
+```
+[blank / recorded]
+  ↓ User enters "Scheduled to be paid on [date]" in Notes/Memos
+[SCHEDULED ❗ red icon]
+  ↓ Scheduled date passes with no status update
+[IN-FLIGHT ❗ red icon + amber row tint + AI prompt]
+  ↓ User marks as pending OR cleared (or AI suggests)
+[PENDING ⚠️]  OR  [CLEARED ✅]
+  ↓ (if pending) Bank posts; user/AI confirms
+[CLEARED ✅]  ← final state
+
+Any state → [VOID] via explicit user action + confirmation prompt
+VOID rows are excluded from all balance computations
+Audit entry created for every status transition
+```
+
+### Scheduled Auto-Trigger Rule (Column E)
+- **Trigger:** Notes/Memos field (Column I) contains the text `"Scheduled to be paid on"` (case-insensitive)
+- **Action:** Column E automatically displays the red scheduled icon
+- **Behavior:** Reactive binding — fires in real time as user types; reverts if text is removed
+- **No user click required** for the scheduled icon to appear
+- Scheduled date is parsed from the notes text: `"Scheduled to be paid on MM/DD/YYYY"`
+
+### In-Flight Transition Rule
+- **Trigger:** System date becomes the day after the parsed `scheduled_date`
+- **Action:** Row receives amber/orange visual tint; tooltip appears; AI prompt fires
+- **Tooltip text:** `"Payment date passed — awaiting bank confirmation"`
+- **AI prompt:** `"This scheduled payment's date has passed. Has it been processed? Mark as pending or confirm it cleared."`
+- **Icon:** Red scheduled icon remains — it is NOT removed
+- **No silent status change** — user is always informed, never surprised
+
+### Pending Status Rule
+- **Source:** Bank reports transaction as "in-process" or "incoming" during reconciliation
+- **Action:** User manually marks as pending, OR AI suggests and user confirms
+- **Visual:** Yellow pending icon in Column E
+
+### Cleared Status Rule
+- **Source:** Bank confirms transaction fully posted and settled
+- **Action:** User manually marks as cleared, OR AI suggests and user confirms
+- **Visual:** Green cleared icon in Column E
+
+### Void Rule
+- Available from any status
+- Requires explicit user action + confirmation prompt
+- Void transactions are struck through visually
+- Excluded from ALL balance computations
+- Cannot be permanently deleted — void is the final deletable state
+- Audit entry created
+
+---
+
+## 11. Monthly Register Rules
+
+### Display
+- One month displayed at a time
+- Month navigation: left/right arrows + tab bar at bottom (January–December + Yearly Summary)
+- Current month is default view on login
+- Register title: `Check Register — [Month Name] [YYYY]`
+
+### Row Behavior
+- Each row represents one transaction
+- Rows are ordered by entry sequence within the month (not auto-sorted by date)
+- Inline editing — click any editable cell to edit
+- Autosave — changes save automatically on cell blur or Enter key
+- Row limit: 220 transaction rows per month (matching Excel system capacity)
+
+### Visual Row States
+| State | Visual Treatment |
+|---|---|
+| `recorded` (blank) | Normal row |
+| `scheduled` | Normal row + red icon in E |
+| `in_flight` | Amber/orange row tint + red icon in E |
+| `pending` | Subtle blue-gray tint + yellow icon in E |
+| `cleared` | Slight green tint or checkmark only — understated |
+| `void` | Struck-through text, grayed out |
+
+### Yearly Summary Tab
+- Read-only derived view
+- No manual input accepted
+- Displays per month: opening balance, total credits, total debits, net change, closing balance
+- Annual totals row at bottom
+
+---
+
+## 12. Locked Month & Audit Log
+
+### Locking Rules
+- The **current month** is always editable
+- **Past months** are locked by default (read-only)
+- **Future months** are read-only until they become the current month
+
+### Unlocking a Locked Month
+1. User navigates to a past month
+2. Lock indicator displayed: `🔒 Locked — This register is closed`
+3. User clicks `[ Unlock to Edit ]`
+4. Confirmation dialog: *"You are about to edit a closed register. All changes will be logged with a timestamp. Continue?"*
+5. User confirms → month becomes editable for the session
+6. Every save in an unlocked past month writes an audit entry
+7. Month can be manually re-locked by user, OR auto-re-locks at end of session
+
+### Audit Log Schema
+```
+AuditEntry {
+  id:               UUID          auto-generated
+  user_id:          UUID          foreign key
+  account_id:       UUID          foreign key
+  register_id:      UUID          foreign key
+  transaction_id:   UUID?         foreign key (null for register-level actions)
+  action:           Enum          unlocked | edited | deleted | voided | re-locked | status_changed
+  field_changed:    String?       which column was modified
+  value_before:     String?       prior value (serialized)
+  value_after:      String?       new value (serialized)
+  reason:           String?       optional user-entered note explaining the edit
+  timestamp:        Timestamp     immutable, server-side
+  ip_address:       String        encrypted
+}
+```
+
+### Audit Log Rules
+- **Append-only** — no entry is ever modified or deleted, by anyone
+- Covers: all edits to locked months, all status transitions, all void actions, all unlock events
+- Viewable by user in account settings (read-only view)
+- Future: exportable as CSV for personal records
+
+---
+
+## 13. Reconciliation System
+
+### What Reconciliation Means in This App
+Reconciliation is the process of confirming that the user's ledger matches the bank's records. It is performed by the user (assisted by AI), not automated.
+
+### Reconciliation Workflow
+1. User opens current month register
+2. User enters bank's current reported balances into header fields (G1, G2)
+3. App computes Actual Balance (H2) from ledger
+4. Reconciliation status indicator compares the three values
+5. AI identifies unmatched transactions and explains gaps
+6. User updates transaction statuses based on AI suggestions
+7. When all three balances converge: reconciliation is complete ✅
+
+### Reconciliation Status Indicator (Header)
+```
+Unreconciled state:
+  ⚠️ Reconciliation needed
+  Gap: $X,XXX.XX in unresolved transactions
+  [N scheduled]  [N pending]  [N unsynced]
+
+Reconciled state:
+  ✅ Fully reconciled — all balances match
+```
+
+### Gap Explanation (AI-Generated)
+When gaps exist, AI provides a plain-language explanation:
+> *"Your $2,965.37 gap consists of 8 scheduled payments totaling $2,681.68 and 1 pending transaction of $251.86. Everything is accounted for."*
+
+---
+
+## 14. AI Layer
+
+### What AI Does in This App
+| Function | Description |
+|---|---|
+| Transaction matching | Matches bank-reported transactions to user ledger entries during reconciliation |
+| Status suggestions | Suggests marking transactions as `pending` or `cleared` based on bank data |
+| Gap explanation | Explains in plain language why balances differ |
+| In-flight prompts | Prompts user when a scheduled payment's date has passed |
+| Discrepancy flagging | Flags anomalies: duplicate amounts, missing entries, unexpected charges |
+| Reconciliation summary | Produces a plain-language reconciliation summary at end of session |
+
+### What AI Does NOT Do
+- AI does **not** automatically update any transaction status
+- AI does **not** make financial decisions
+- AI does **not** manage budgets or categorize spending
+- AI does **not** connect to the bank without explicit user initiation
+- AI does **not** overwrite user-entered data, ever
+
+### AI Interaction Model
+```
+AI SUGGESTS → User sees suggestion with [ Accept ] [ Ignore ] options
+User clicks Accept → status updates, audit entry logged
+User clicks Ignore → suggestion dismissed, no change
+```
+
+Every AI suggestion that is accepted is logged in the audit trail with `action = 'ai_suggestion_accepted'`.
+
+### AI Integration
+- Anthropic Claude API (claude-sonnet model)
+- Context provided per reconciliation session: current month transactions, bank-reported balances, prior reconciliation state
+- AI responses are structured (JSON) for programmatic suggestion display
+- Natural language summaries rendered as plain text in the UI
+
+---
+
+## 15. Data Schema
+
+### Table: `users`
+```sql
+id              UUID PRIMARY KEY DEFAULT gen_random_uuid()
+email           TEXT UNIQUE NOT NULL
+created_at      TIMESTAMPTZ DEFAULT now()
+updated_at      TIMESTAMPTZ DEFAULT now()
+```
+
+### Table: `accounts`
+```sql
+id              UUID PRIMARY KEY DEFAULT gen_random_uuid()
+user_id         UUID REFERENCES users(id) NOT NULL
+nickname        TEXT NOT NULL
+bank_name       TEXT NOT NULL
+account_type    TEXT CHECK (account_type IN ('checking', 'savings')) NOT NULL
+routing_number  TEXT NOT NULL  -- encrypted at application layer
+account_number  TEXT NOT NULL  -- encrypted at application layer
+is_active       BOOLEAN DEFAULT true
+created_at      TIMESTAMPTZ DEFAULT now()
+updated_at      TIMESTAMPTZ DEFAULT now()
+```
+
+### Table: `registers`
+```sql
+id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+account_id          UUID REFERENCES accounts(id) NOT NULL
+month               INTEGER CHECK (month BETWEEN 1 AND 12) NOT NULL
+year                INTEGER NOT NULL
+opening_balance     NUMERIC(12,2) NOT NULL DEFAULT 0.00
+current_bank_bal    NUMERIC(12,2)  -- user-entered during reconciliation
+available_bank_bal  NUMERIC(12,2)  -- user-entered during reconciliation
+is_locked           BOOLEAN DEFAULT false
+created_at          TIMESTAMPTZ DEFAULT now()
+updated_at          TIMESTAMPTZ DEFAULT now()
+UNIQUE (account_id, month, year)
+```
+
+### Table: `transactions`
+```sql
+id              UUID PRIMARY KEY DEFAULT gen_random_uuid()
+register_id     UUID REFERENCES registers(id) NOT NULL
+row_order       INTEGER NOT NULL  -- preserves display sequence within month
+check_number    INTEGER           -- optional
+date            DATE NOT NULL     -- user-entered intent date; future dates allowed
+description     TEXT NOT NULL
+status          TEXT CHECK (status IN (
+                  'recorded',
+                  'scheduled',
+                  'in_flight',
+                  'pending',
+                  'cleared',
+                  'void'
+                )) DEFAULT 'recorded'
+debit           NUMERIC(12,2) CHECK (debit > 0)   -- mutually exclusive with credit
+credit          NUMERIC(12,2) CHECK (credit > 0)  -- mutually exclusive with debit
+-- balance column is NOT stored — always computed on read
+notes           TEXT
+scheduled_date  DATE              -- parsed from notes when scheduled auto-rule fires
+created_at      TIMESTAMPTZ DEFAULT now()
+updated_at      TIMESTAMPTZ DEFAULT now()
+CONSTRAINT debit_credit_exclusive CHECK (
+  NOT (debit IS NOT NULL AND credit IS NOT NULL)
+)
+```
+
+### Table: `audit_log`
+```sql
+id              UUID PRIMARY KEY DEFAULT gen_random_uuid()
+user_id         UUID REFERENCES users(id) NOT NULL
+account_id      UUID REFERENCES accounts(id) NOT NULL
+register_id     UUID REFERENCES registers(id)
+transaction_id  UUID REFERENCES transactions(id)
+action          TEXT NOT NULL  -- unlocked | edited | voided | re-locked | status_changed | ai_suggestion_accepted
+field_changed   TEXT
+value_before    TEXT
+value_after     TEXT
+reason          TEXT           -- optional user note
+ip_address      TEXT           -- encrypted
+timestamp       TIMESTAMPTZ DEFAULT now() NOT NULL
+-- NO update or delete permissions on this table — append only
+```
+
+### Balance Computation (Application Layer — Never SQL Stored)
+```typescript
+function computeRunningBalance(
+  openingBalance: number,
+  transactions: Transaction[]
+): Transaction[] {
+  let running = openingBalance;
+  return transactions.map(tx => {
+    if (tx.status === 'void' || (!tx.debit && !tx.credit)) {
+      return { ...tx, balance: null };
+    }
+    running += (tx.credit ?? 0) - (tx.debit ?? 0);
+    return { ...tx, balance: running };
+  });
+}
+
+function computeCurrentBalance(
+  openingBalance: number,
+  transactions: Transaction[]
+): number {
+  return transactions
+    .filter(tx => tx.status !== 'void')
+    .reduce((acc, tx) => acc + (tx.credit ?? 0) - (tx.debit ?? 0), openingBalance);
+}
+
+function computeAvailableBalance(
+  openingBalance: number,
+  transactions: Transaction[]
+): number {
+  return transactions
+    .filter(tx => tx.status === 'cleared')
+    .reduce((acc, tx) => acc + (tx.credit ?? 0) - (tx.debit ?? 0), openingBalance);
+}
+
+// Current Balance = Actual Balance (same computation, two labels)
+const actualBalance = computeCurrentBalance(openingBalance, transactions);
+const availableBalance = computeAvailableBalance(openingBalance, transactions);
+
+// Convergence test
+const isFullyReconciled =
+  actualBalance === availableBalance &&
+  actualBalance === register.current_bank_bal &&
+  availableBalance === register.available_bank_bal;
+```
+
+---
+
+## 16. UI Specification
+
+### Layout — Register View
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Check Register — March 2026                    [Account Name]  │
+├──────────────────────────┬──────────────────────────────────────┤
+│  BANK                    │  YOUR LEDGER                         │
+│  Current     $6,212.80   │  Actual Balance        $3,247.43     │
+│  Available   $5,925.11   │  ← your source of truth             │
+├──────────────────────────┴──────────────────────────────────────┤
+│  ⚠️ Reconciliation needed  |  $2,965.37 gap  |  8 scheduled     │
+│     1 pending  |  0 unsynced                                     │
+├─────────────────────────────────────────────────────────────────┤
+│  [Check#] [Date] [Description──────────────] [S] [-] [+] [Bal] │
+│  ──────────────────────────────────────────────────────────── │
+│  rows...                                                         │
+├─────────────────────────────────────────────────────────────────┤
+│  [JAN] [FEB] [MAR*] [APR] [MAY] [JUN] [JUL]                    │
+│  [AUG] [SEP] [OCT] [NOV] [DEC] [YEARLY SUMMARY]                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Header — Balance Display
+- **Bank column** (left): Current Balance + Available Balance (bank-reported, user-entered during reconciliation)
+- **Ledger column** (right): Actual Balance (computed, always prominent)
+- Actual Balance receives the strongest visual weight — largest, boldest
+- Reconciliation status bar below the two balance columns
+
+### Reconciliation Status Bar
+```
+When unreconciled:
+⚠️ Reconciliation needed  ·  $X,XXX.XX gap  ·  N scheduled  ·  N pending
+
+When reconciled:
+✅ Fully reconciled — all balances match
+```
+
+### Row Visual States
+| Status | Row Treatment |
+|---|---|
+| `recorded` | Default styling |
+| `scheduled` | Default + red icon in status column |
+| `in_flight` | Amber/orange row background tint + red icon + tooltip indicator |
+| `pending` | Subtle blue-gray tint + yellow icon |
+| `cleared` | Subtle green tint or no tint (understated) + green icon |
+| `void` | All text struck through, row grayed out |
+
+### Inline Editing
+- Click any editable cell → cell becomes an input field
+- Tab key moves to next editable cell in row
+- Enter key saves current cell
+- Escape key cancels edit and reverts to prior value
+- Autosave on blur (clicking away from cell)
+- Debit and credit fields disable each other reactively
+
+### Month Navigation
+- Tab bar at bottom of register: January through December + Yearly Summary
+- Current month highlighted/underlined
+- Past months show lock icon 🔒 on hover
+- Future months are accessible (for pre-entry of scheduled items) but show no lock
+
+### Locked Month Banner
+```
+🔒 This register is closed (January 2026)
+All entries are read-only.
+[ Unlock to Edit ]
+```
+
+### Mobile Responsiveness
+- Progressive Web App (PWA) — installable on mobile home screen
+- Offline-first: register readable without network; edits queue and sync on reconnect
+- On mobile: columns collapse gracefully; Description and Balance always visible
+- Status icons remain full-size on all screen sizes
+- Touch targets minimum 44x44px for all interactive elements
+
+---
+
+## 17. Validation Rules
+
+### Transaction Row Validation
+| Field | Rule |
+|---|---|
+| Date | Required; valid MM/DD/YYYY format; future dates allowed |
+| Description | Required; max 255 characters; not blank |
+| Debit | Positive decimal, max 2 decimal places; cannot coexist with Credit |
+| Credit | Positive decimal, max 2 decimal places; cannot coexist with Debit |
+| Check # | Positive integer only; optional |
+| At least one of Debit/Credit | Row must have either debit or credit to compute balance |
+| Notes trigger | If Notes contains "Scheduled to be paid on", status auto-sets to `scheduled` |
+
+### Balance Validation
+| Rule |
+|---|
+| Balance column H is never editable |
+| Opening balance is never editable after being set (except by admin unlock) |
+| Running balance recomputes on every save |
+| Void rows produce null balance and do not affect running total |
+
+### Account Validation
+| Field | Rule |
+|---|---|
+| Routing number | Exactly 9 digits; numeric only |
+| Account number | 8–17 digits; numeric only |
+| Nickname | Required; max 50 characters |
+
+---
+
+## 18. Bank Sync (Optional — v2)
+
+Bank sync is an **optional enhancement** for reconciliation assistance. It is not required for the core register to function.
+
+### Integration: Plaid
+- Plaid Link for secure bank connection
+- Read-only access — no write permissions to bank ever
+- Transactions fetched for matching purposes only
+
+### Sync Model
+- Bank transactions are fetched and stored separately from ledger transactions
+- App attempts to **match** bank transactions to existing ledger entries
+- Matched = AI suggests marking ledger entry as `pending` or `cleared`
+- Unmatched bank transaction = AI flags: *"Bank shows a $45.96 Walgreens on 3/18 — do you want to add this to your register?"*
+- User always has final authority — no auto-merge, ever
+
+### What Bank Sync Never Does
+- Never overwrites a user-entered transaction
+- Never auto-creates ledger entries
+- Never auto-changes a transaction status
+- Never deletes any ledger data
+
+---
+
+## 19. Tech Stack Recommendation
+
+### Frontend
+| Layer | Technology | Reason |
+|---|---|---|
+| Framework | React + TypeScript | Component-based, type-safe, excellent ecosystem |
+| Styling | Tailwind CSS | Utility-first, responsive, consistent |
+| PWA | Vite PWA plugin | Offline support, mobile installable |
+| Local cache | IndexedDB (via Dexie.js) | Offline-first reads |
+| State | Zustand or React Query | Lightweight, predictable |
+
+### Backend
+| Layer | Technology | Reason |
+|---|---|---|
+| Platform | Supabase | Managed Postgres + Auth + RLS + Realtime |
+| Database | PostgreSQL | ACID compliant, ideal for financial ledger |
+| Auth | Supabase Auth | Built-in MFA, JWT, session management |
+| Security | Row-Level Security | User data isolation at database level |
+| API | Supabase auto-generated REST + custom Edge Functions | |
+
+### AI
+| Layer | Technology |
+|---|---|
+| Model | Anthropic Claude (claude-sonnet) |
+| Integration | Anthropic API via Supabase Edge Function |
+| Context | Per-session reconciliation context passed with each request |
+
+### Bank Sync (v2)
+| Layer | Technology |
+|---|---|
+| Provider | Plaid |
+| Access | Read-only |
+| Storage | Separate `bank_transactions` table — never mixed with ledger |
+
+---
+
+## 20. Build Phases
+
+### Phase 1 — Foundation (MVP)
+- User authentication (email + password + MFA)
+- Account management (CRUD)
+- Monthly register view (one month at a time)
+- Transaction CRUD (inline editing, autosave)
+- Column definitions B–I fully implemented
+- Three balance computations (Current / Available / Actual)
+- Status system (recorded / scheduled / pending / cleared / void)
+- Scheduled auto-trigger from Notes/Memos
+- Mutual exclusivity rule (debit/credit)
+- Running balance computation (never stored)
+- Monthly carry-forward (normalized single rule)
+- Month navigation (tab bar)
+- Yearly summary (derived, read-only)
+- Locked months with Option B unlock
+- Audit log (append-only)
+- Mobile responsive / PWA
+
+### Phase 2 — Reconciliation & AI
+- Header balance input (user enters bank's current/available)
+- Reconciliation status indicator
+- Gap diagnostic display
+- AI reconciliation assistant (gap explanation, status suggestions)
+- In-flight prompt system (scheduled date passed)
+- AI suggestion accept/ignore flow
+- Audit log entries for AI-accepted suggestions
+
+### Phase 3 — Bank Sync (Optional)
+- Plaid integration (read-only)
+- Bank transaction fetching and storage
+- AI-assisted matching (bank → ledger)
+- Unmatched transaction flagging
+- Sync status indicator
+
+### Phase 4 — Polish & Export
+- CSV export (per month, per year)
+- PDF export (register view)
+- Account settings (routing/account number management)
+- Audit log viewer (user-facing)
+- Performance optimization
+- Accessibility audit (WCAG 2.1 AA)
+
+---
+
+## Appendix A — Glossary
+
+| Term | Definition |
+|---|---|
+| **Ledger Balance** | The authoritative balance computed from all user-entered transactions |
+| **Current Balance** | Ledger balance relabeled as the bank-side reconciliation target |
+| **Available Balance** | Balance computed from cleared transactions only; mirrors bank's available |
+| **Actual Balance** | Ledger balance relabeled as the user's true spendable truth |
+| **Convergence** | The state when Current = Available = Actual; fully reconciled |
+| **Opening Balance** | The starting balance of a monthly register; carried from prior month closing |
+| **Closing Balance** | The balance of the last non-void transaction row in a month |
+| **Carry-Forward** | The automatic transfer of a closing balance to the next month's opening balance |
+| **Reconciliation** | The process of confirming ledger matches bank; user-performed, AI-assisted |
+| **In-Flight** | A scheduled payment whose date has passed but bank confirmation not yet received |
+| **Void** | A cancelled transaction; excluded from all computations; never deleted |
+
+---
+
+## Appendix B — Key Rules Summary (Quick Reference for Developers)
+
+1. Balance column H is **never stored** — always computed on read
+2. Debit and credit are **mutually exclusive** per row — enforced at DB and UI layers
+3. Opening balance is **read-only** after being set (except manual unlock)
+4. Carry-forward is **one rule**: prior month last balance → current month opening
+5. Scheduled icon is **auto-triggered** by Notes/Memos text — no user click needed
+6. **Nothing changes silently** — AI suggests, user confirms, always
+7. Audit log is **append-only** — no modifications or deletions, ever
+8. Routing and account numbers are **encrypted at rest** and **masked in UI**
+9. Void is the only way to "delete" a transaction — **hard delete is never permitted**
+10. All three balances **converge** when fully reconciled — this is the validation test
+
+---
+
+*End of Specification — Version 1.0*
