@@ -4,6 +4,9 @@
 
 export type AccountType = 'checking' | 'savings'
 
+export type MonthStatus = 'open' | 'ready_to_close' | 'soft_closed' | 'hard_closed'
+export type LastClosedType = 'soft' | 'hard' | null
+
 export type TransactionStatus =
   | 'recorded'
   | 'scheduled'
@@ -20,6 +23,11 @@ export type AuditAction =
   | 'status_changed'
   | 'ai_suggestion_accepted'
   | 'deleted'
+  | 'opening_balance_updated'
+  | 'opening_balance_mismatch_kept'
+  | 'month_soft_closed'
+  | 'month_hard_closed'
+  | 'month_reopened'
 
 // ============================================================
 // Database row types (snake_case, matches Supabase response)
@@ -54,6 +62,9 @@ export interface DbRegister {
   current_bank_bal: number | null   // user-entered during reconciliation
   available_bank_bal: number | null // user-entered during reconciliation
   is_locked: boolean
+  is_manual_opening: boolean
+  month_status: MonthStatus
+  last_closed_type: LastClosedType
   created_at: string
   updated_at: string
 }

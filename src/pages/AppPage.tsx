@@ -8,6 +8,7 @@ import { useAccounts } from '@/hooks/useAccounts'
 import { useAuthStore } from '@/store/authStore'
 import { RegisterView } from '@/components/register/RegisterView'
 import { AccountSetupModal } from '@/components/accounts/AccountSetupModal'
+import { OpeningBalanceModal } from '@/components/accounts/OpeningBalanceModal'
 import type { DbAccount } from '@/types'
 
 export function AppPage() {
@@ -15,6 +16,7 @@ export function AppPage() {
   const { data: accounts = [], isLoading } = useAccounts()
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null)
   const [showSetup, setShowSetup] = useState(false)
+  const [pendingOpeningBalanceAccountId, setPendingOpeningBalanceAccountId] = useState<string | null>(null)
 
   const selectedAccount: DbAccount | undefined =
     accounts.find((a) => a.id === selectedAccountId) ?? accounts[0]
@@ -88,6 +90,24 @@ export function AppPage() {
         <AccountSetupModal
           userId={user!.id}
           onClose={() => setShowSetup(false)}
+          onAccountCreated={(accountId) => {
+            setShowSetup(false)
+            setPendingOpeningBalanceAccountId(accountId)
+          }}
+        />
+      )}
+
+      {pendingOpeningBalanceAccountId && (
+        <OpeningBalanceModal
+          accountId={pendingOpeningBalanceAccountId}
+          onComplete={() => {
+            setSelectedAccountId(pendingOpeningBalanceAccountId)
+            setPendingOpeningBalanceAccountId(null)
+          }}
+          onCancel={() => {
+            setSelectedAccountId(pendingOpeningBalanceAccountId)
+            setPendingOpeningBalanceAccountId(null)
+          }}
         />
       )}
     </div>

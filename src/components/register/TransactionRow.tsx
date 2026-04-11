@@ -9,6 +9,13 @@ import { StatusIcon, statusRowClass } from '@/components/ui/StatusIcon'
 import { formatCurrency, parseCurrencyInput, detectScheduledPhrase } from '@/lib/balance'
 import type { Transaction, TransactionStatus } from '@/types'
 
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr + 'T00:00:00')
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${mm}/${dd}/${d.getFullYear()}`
+}
+
 const STATUS_OPTIONS: { value: TransactionStatus; label: string }[] = [
   { value: 'recorded', label: 'Recorded' },
   { value: 'pending', label: 'Pending' },
@@ -207,7 +214,7 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, onSave, on
           />
         ) : (
           <span className="text-xs tabular-nums">
-            {tx.date ? new Date(tx.date + 'T00:00:00').toLocaleDateString('en-US') : ''}
+            {tx.date ? formatDate(tx.date) : ''}
           </span>
         )}
       </td>

@@ -154,6 +154,11 @@ function floatEq(a: number, b: number): boolean {
   return Math.abs(a - b) < 0.001
 }
 
+/** Exported currency equality — half-cent tolerance for carry-forward comparisons. */
+export function currencyEq(a: number, b: number): boolean {
+  return Math.abs(a - b) < 0.005
+}
+
 /**
  * Format a number as USD currency string.
  */

@@ -33,6 +33,8 @@ export function useCreateRegister() {
       month: number
       year: number
       opening_balance: number
+      is_locked?: boolean
+      is_manual_opening?: boolean
     }): Promise<DbRegister> => {
       const { data, error } = await supabase
         .from('registers')

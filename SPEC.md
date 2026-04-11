@@ -405,6 +405,69 @@ Audit entry created for every status transition
 - Displays per month: opening balance, total credits, total debits, net change, closing balance
 - Annual totals row at bottom
 
+### Month Status State Machine
+
+Every register has a `month_status` field that tracks its lifecycle:
+
+| Status | Meaning | Editable | UI |
+|---|---|---|---|
+| `open` | Default; has uncleared transactions | Yes | Normal |
+| `ready_to_close` | All non-void transactions cleared | Yes | Close prompt shown once |
+| `soft_closed` | User closed; next month still open | No (`is_locked = true`) | "Reopen [Month]" button |
+| `hard_closed` | Next month also closed; fully archived | No (`is_locked = true`) | "🔒 Archived" + unlock dialog |
+
+**Transitions:**
+- `open` → `ready_to_close`: automatic when all non-void transactions reach `cleared` status
+- `ready_to_close` → `open`: automatic when any non-cleared transaction is added or editing reverts a cleared transaction
+- `ready_to_close` → `soft_closed`: explicit user action ("Close & Archive")
+- `soft_closed` → `open`: user clicks "Reopen" (no confirmation, no audit, only while next month is not soft_closed)
+- `soft_closed` → `hard_closed`: automatic when the next sequential month transitions to `soft_closed`
+- `hard_closed` → editable session: existing unlock dialog + full audit log (existing flow, preserved)
+
+### Opening Balance Carry-Forward Rule (Revised)
+
+Next month's `opening_balance` = the running balance at the last **cleared** transaction in the prior month, computed by iterating transactions in `row_order` sequence. Running balance includes all non-void transactions; the "snapshot" is recorded each time a cleared transaction is encountered.
+
+This updates **silently** (no prompt) whenever any transaction in the prior month changes status. Guards:
+- Never updates a locked (`is_locked = true`) next month
+- Never updates when the source month is `soft_closed` or `hard_closed`
+
+### Close & Archive Flow
+
+Triggered when the user clicks "Close & Archive [Month]" from the ready-to-close prompt:
+
+**Happy path** (closing balance = next month opening, or no next month):
+- Prompt: "✅ All [Month] transactions are cleared. [Month]'s final balance is $X. Ready to close?"
+- Buttons: `[ Not Yet ]` | `[ Close & Archive [Month] ]`
+
+**Unhappy path** (discrepancy between closing and next month opening):
+- Prompt shows the dollar difference and both amounts
+- Buttons: `[ Use [Month]'s closing balance — $X ]` | `[ Keep [Next Month]'s opening balance — $X ]` | `[ Explain the difference ]` (Phase 2 AI)
+- `[ Keep [Next Month]'s opening balance ]` requires a non-empty reason text input before it becomes enabled; reason is saved to the audit log `reason` field
+
+### Unhappy Path Prompt Suppression Rule
+
+The opening balance mismatch prompt displays whenever **ALL** of the following are true:
+1. Current month status is `open` or `ready_to_close`
+2. A mismatch exists between current month closing balance and next month's opening balance
+3. Next month has `is_manual_opening = true`
+
+The prompt is suppressed when **ANY** of the following are true:
+1. Current month status is `soft_closed` or `hard_closed`
+2. No mismatch exists (balances are equal within half-cent tolerance)
+3. Next month has `is_manual_opening = false`
+
+**Persistence behavior:** The prompt re-appears on every navigation to the month until the month is archived. This is correct — the mismatch is unresolved until the user commits to a final decision via Close & Archive. Once archived (`soft_closed`), the decision is permanent and the prompt never fires again for that month unless it is reopened via the unlock flow.
+
+There is no intermediate "acknowledged but not yet archived" suppression state. Clicking `[ Keep [Next Month]'s opening balance ]` in the unhappy close prompt resolves the discrepancy decision for the archive action only; it does not suppress the prompt on subsequent navigation before archiving.
+
+**On confirm (either path):**
+- `month_status = 'soft_closed'`
+- `is_locked = true`
+- Next month's `opening_balance` set to this month's closing balance (if "Use closing" chosen)
+- Audit log: `action = 'month_soft_closed'`
+- If prior month is `soft_closed` → prior month auto-upgrades to `hard_closed`, audit logged
+
 ---
 
 ## 12. Locked Month & Audit Log

@@ -11,6 +11,7 @@ import type { AccountType } from '@/types'
 interface AccountSetupModalProps {
   userId: string
   onClose: () => void
+  onAccountCreated?: (accountId: string) => void
 }
 
 // Simple XOR-based placeholder encryption.
@@ -22,7 +23,7 @@ function encryptField(plain: string): string {
   return btoa(plain)
 }
 
-export function AccountSetupModal({ userId, onClose }: AccountSetupModalProps) {
+export function AccountSetupModal({ userId, onClose, onAccountCreated }: AccountSetupModalProps) {
   const [nickname, setNickname] = useState('')
   const [bankName, setBankName] = useState('')
   const [accountType, setAccountType] = useState<AccountType>('checking')
@@ -48,7 +49,7 @@ export function AccountSetupModal({ userId, onClose }: AccountSetupModalProps) {
     setError(null)
 
     try {
-      await createAccount.mutateAsync({
+      const account = await createAccount.mutateAsync({
         user_id: userId,
         nickname: nickname.trim(),
         bank_name: bankName.trim(),
@@ -56,7 +57,11 @@ export function AccountSetupModal({ userId, onClose }: AccountSetupModalProps) {
         routing_number: encryptField(routingNumber),
         account_number: encryptField(accountNumber),
       })
-      onClose()
+      if (onAccountCreated) {
+        onAccountCreated(account.id)
+      } else {
+        onClose()
+      }
     } catch (err) {
       setError((err as Error).message)
     }
