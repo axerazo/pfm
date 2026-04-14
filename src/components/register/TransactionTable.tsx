@@ -129,6 +129,7 @@ export function TransactionTable({
               transaction={tx}
               rowIndex={i}
               isLocked={isLocked}
+              accountId={register.account_id}
               onSave={onSave}
               onVoid={onVoid}
             />
@@ -138,6 +139,7 @@ export function TransactionTable({
               registerId={register.id}
               nextRowOrder={nextRowOrder}
               isLocked={isLocked}
+              accountId={register.account_id}
               onCreate={onCreate}
             />
           )}

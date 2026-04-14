@@ -6,7 +6,9 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { StatusIcon, statusRowClass } from '@/components/ui/StatusIcon'
+import { AutocompleteInput } from '@/components/ui/AutocompleteInput'
 import { formatCurrency, parseCurrencyInput, detectScheduledPhrase } from '@/lib/balance'
+import { useSuggestions, invalidateSuggestionCache } from '@/hooks/useSuggestions'
 import type { Transaction, TransactionStatus } from '@/types'
 
 function formatDate(dateStr: string): string {
@@ -27,6 +29,7 @@ interface TransactionRowProps {
   transaction: Transaction
   rowIndex: number
   isLocked: boolean
+  accountId: string
   onSave: (id: string, changes: Partial<Transaction>) => void
   onVoid: (id: string) => void
 }
@@ -51,12 +54,16 @@ function toEditState(tx: Transaction): EditState {
   }
 }
 
-export function TransactionRow({ transaction: tx, rowIndex, isLocked, onSave, onVoid }: TransactionRowProps) {
+export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId, onSave, onVoid }: TransactionRowProps) {
   const [editing, setEditing] = useState<EditState | null>(null)
   const [debitCreditError, setDebitCreditError] = useState(false)
   const [statusMenuOpen, setStatusMenuOpen] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const statusMenuRef = useRef<HTMLDivElement>(null)
+
+  // Autocomplete suggestions — hooks called unconditionally; return [] when editing is null
+  const descSuggestions  = useSuggestions(accountId, 'description', editing?.description ?? '')
+  const notesSuggestions = useSuggestions(accountId, 'notes',       editing?.notes       ?? '')
 
   // Close status menu when clicking outside
   useEffect(() => {
@@ -108,9 +115,10 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, onSave, on
         credit: credit ?? null,
         notes: state.notes.trim() || null,
       })
+      invalidateSuggestionCache(accountId)
       setEditing(null)
     },
-    [tx.id, onSave],
+    [tx.id, onSave, accountId],
   )
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -222,12 +230,14 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, onSave, on
       {/* Description — Column D */}
       <td className="px-3 py-2 min-w-0 flex-1">
         {editing ? (
-          <input
+          <AutocompleteInput
             type="text"
             value={display.description}
             onChange={(e) => setEditing({ ...editing, description: e.target.value })}
             onBlur={handleBlur}
             onFocus={handleFocus}
+            suggestions={descSuggestions}
+            onAccept={(val) => setEditing((s) => s ? { ...s, description: val } : s)}
             className="w-full bg-transparent border-b border-blue-400 outline-none"
             maxLength={255}
             autoFocus
@@ -351,12 +361,14 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, onSave, on
       {/* Notes — Column I */}
       <td className="px-3 py-2 w-44">
         {editing ? (
-          <input
+          <AutocompleteInput
             type="text"
             value={display.notes}
             onChange={(e) => setEditing({ ...editing, notes: e.target.value })}
             onBlur={handleBlur}
             onFocus={handleFocus}
+            suggestions={notesSuggestions}
+            onAccept={(val) => setEditing((s) => s ? { ...s, notes: val } : s)}
             className="w-full bg-transparent border-b border-blue-400 outline-none text-xs text-slate-500"
             placeholder='e.g. "Scheduled to be paid on 04/15/2026"'
           />
@@ -383,13 +395,14 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, onSave, on
 }
 
 // ============================================================
-// New empty row for appending transactions
+// New empty row for appending transactions — keyboard-driven
 // ============================================================
 
 interface NewTransactionRowProps {
   registerId: string
   nextRowOrder: number
   isLocked: boolean
+  accountId: string
   onCreate: (payload: {
     register_id: string
     row_order: number
@@ -402,42 +415,87 @@ interface NewTransactionRowProps {
   }) => void
 }
 
+function todayIso() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function blankDraft(): EditState {
+  return { check_number: '', date: todayIso(), description: '', debit: '', credit: '', notes: '' }
+}
+
 export function NewTransactionRow({
   registerId,
   nextRowOrder,
   isLocked,
+  accountId,
   onCreate,
 }: NewTransactionRowProps) {
-  const today = new Date().toISOString().split('T')[0]!
-  const [draft, setDraft] = useState<EditState>({
-    check_number: '',
-    date: today,
-    description: '',
-    debit: '',
-    credit: '',
-    notes: '',
-  })
   const [active, setActive] = useState(false)
+  const [draft, setDraft] = useState<EditState>(blankDraft)
   const [debitCreditError, setDebitCreditError] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
 
-  function handleDebitChange(raw: string) {
-    if (draft.credit !== '' && raw !== '') { setDebitCreditError(true); return }
-    setDebitCreditError(false)
-    setDraft({ ...draft, debit: raw })
+  const rowRef    = useRef<HTMLTableRowElement>(null)
+  const dateRef   = useRef<HTMLInputElement>(null)
+  const descRef   = useRef<HTMLInputElement>(null)
+  const debitRef  = useRef<HTMLInputElement>(null)
+  const creditRef = useRef<HTMLInputElement>(null)
+  const notesRef  = useRef<HTMLInputElement>(null)
+
+  // Autocomplete — only fires when 2+ chars typed; returns [] otherwise
+  const descSuggestions  = useSuggestions(accountId, 'description', draft.description)
+  const notesSuggestions = useSuggestions(accountId, 'notes',       draft.notes)
+
+  function isDraftEmpty() {
+    return (
+      !draft.check_number.trim() &&
+      !draft.description.trim() &&
+      !draft.debit &&
+      !draft.credit &&
+      !draft.notes.trim()
+    )
   }
 
-  function handleCreditChange(raw: string) {
-    if (draft.debit !== '' && raw !== '') { setDebitCreditError(true); return }
+  // Save-and-continue: reset draft, keep row open, scroll into view, re-focus Date.
+  // scrollIntoView('center') ensures the row is never right at the bottom of the
+  // viewport when the user starts typing — gives the dropdown room to open downward.
+  function resetAndContinue() {
+    setDraft(blankDraft())
     setDebitCreditError(false)
-    setDraft({ ...draft, credit: raw })
+    setConfirmDiscard(false)
+    setTimeout(() => {
+      rowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      dateRef.current?.focus()
+    }, 0)
   }
 
-  function handleSubmit() {
+  function deactivate() {
+    setActive(false)
+    setDraft(blankDraft())
+    setDebitCreditError(false)
+    setConfirmDiscard(false)
+  }
+
+  function activate() {
+    setActive(true)
+    setTimeout(() => {
+      rowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      dateRef.current?.focus()
+    }, 0)
+  }
+
+  // notesOverride is passed by the notes AutocompleteInput onAccept so
+  // we can use the accepted value before React has re-rendered draft.notes.
+  function handleSubmit(notesOverride?: string) {
     if (!draft.description.trim() || !draft.date) return
     const debit = parseCurrencyInput(draft.debit)
     const credit = parseCurrencyInput(draft.credit)
-    if (debit != null && credit != null) { setDebitCreditError(true); return }
-
+    if (debit != null && credit != null) {
+      setDebitCreditError(true)
+      return
+    }
+    const notesVal = notesOverride !== undefined ? notesOverride : draft.notes
     onCreate({
       register_id: registerId,
       row_order: nextRowOrder,
@@ -446,16 +504,36 @@ export function NewTransactionRow({
       debit: debit ?? null,
       credit: credit ?? null,
       check_number: draft.check_number ? parseInt(draft.check_number, 10) : null,
-      notes: draft.notes.trim() || null,
+      notes: notesVal.trim() || null,
     })
-    setDraft({ check_number: '', date: today, description: '', debit: '', credit: '', notes: '' })
-    setActive(false)
-    setDebitCreditError(false)
+    invalidateSuggestionCache(accountId)
+    resetAndContinue()
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'Enter') handleSubmit()
-    if (e.key === 'Escape') { setActive(false); setDebitCreditError(false) }
+  function handleEscape() {
+    if (isDraftEmpty()) {
+      deactivate()
+    } else {
+      setConfirmDiscard(true)
+    }
+  }
+
+  function handleDebitChange(raw: string) {
+    if (draft.credit !== '' && raw !== '') { setDebitCreditError(true); return }
+    setDebitCreditError(false)
+    setDraft((d) => ({ ...d, debit: raw }))
+  }
+
+  function handleCreditChange(raw: string) {
+    if (draft.debit !== '' && raw !== '') { setDebitCreditError(true); return }
+    setDebitCreditError(false)
+    setDraft((d) => ({ ...d, credit: raw }))
+  }
+
+  // Enter saves from any field; Escape triggers discard logic
+  function commonKeys(e: React.KeyboardEvent) {
+    if (e.key === 'Enter')  { e.preventDefault(); handleSubmit() }
+    if (e.key === 'Escape') { e.preventDefault(); handleEscape() }
   }
 
   if (isLocked) return null
@@ -465,7 +543,7 @@ export function NewTransactionRow({
       <tr>
         <td colSpan={9} className="px-4 py-2">
           <button
-            onClick={() => setActive(true)}
+            onClick={activate}
             className="text-sm text-slate-400 hover:text-blue-600 transition-colors flex items-center gap-1"
           >
             <span className="text-lg leading-none">+</span> Add transaction
@@ -475,87 +553,196 @@ export function NewTransactionRow({
     )
   }
 
+  // Discard-confirmation overlay — replaces the form row temporarily
+  if (confirmDiscard) {
+    return (
+      <tr className="border-b border-amber-200 bg-amber-50">
+        <td colSpan={9} className="px-4 py-3">
+          <span className="text-sm text-amber-800 mr-3">Discard this entry?</span>
+          <button
+            autoFocus
+            onClick={deactivate}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') deactivate()
+              if (e.key === 'Escape') { setConfirmDiscard(false); setTimeout(() => descRef.current?.focus(), 0) }
+            }}
+            className="px-3 py-1 mr-2 bg-amber-600 text-white text-xs rounded hover:bg-amber-700"
+          >
+            Yes, discard
+          </button>
+          <button
+            onClick={() => { setConfirmDiscard(false); setTimeout(() => descRef.current?.focus(), 0) }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === 'Escape') {
+                setConfirmDiscard(false)
+                setTimeout(() => descRef.current?.focus(), 0)
+              }
+            }}
+            className="px-3 py-1 bg-slate-200 text-slate-700 text-xs rounded hover:bg-slate-300"
+          >
+            No, keep editing
+          </button>
+        </td>
+      </tr>
+    )
+  }
+
+  const base = 'w-full bg-white border rounded px-1 text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-colors'
+  const err  = debitCreditError ? ' border-red-400' : ' border-slate-200'
+
   return (
-    <tr className="border-b border-blue-100 bg-blue-50/30" onKeyDown={handleKeyDown}>
-      <td className="px-2 py-1 w-16">
+    <tr ref={rowRef} className="border-b border-blue-300 bg-blue-50/70 outline outline-1 outline-blue-200">
+      {/* Check # */}
+      <td className="px-2 py-1.5 w-16">
         <input
           type="text"
           value={draft.check_number}
-          onChange={(e) => setDraft({ ...draft, check_number: e.target.value })}
-          className="w-full bg-white border border-slate-200 rounded px-1 text-center text-xs outline-none focus:border-blue-400"
+          onChange={(e) => setDraft((d) => ({ ...d, check_number: e.target.value }))}
+          onKeyDown={commonKeys}
+          className={`${base} border-slate-200 text-center`}
           placeholder="#"
         />
       </td>
-      <td className="px-2 py-1 w-28">
+
+      {/* Date — browser handles Tab within month/day/year sub-fields natively;
+          Tab out flows to Description via tabIndex order. */}
+      <td className="px-2 py-1.5 w-28">
         <input
+          ref={dateRef}
           type="date"
           value={draft.date}
-          onChange={(e) => setDraft({ ...draft, date: e.target.value })}
-          className="w-full bg-white border border-slate-200 rounded px-1 text-xs outline-none focus:border-blue-400"
+          onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))}
+          onKeyDown={commonKeys}
+          className={`${base} border-slate-200`}
         />
       </td>
-      <td className="px-2 py-1">
-        <input
+
+      {/* Description — smart Tab: skip Debit if Credit is already filled */}
+      <td className="px-2 py-1.5">
+        <AutocompleteInput
+          ref={descRef}
           type="text"
           value={draft.description}
-          onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-          className="w-full bg-white border border-slate-200 rounded px-2 text-sm outline-none focus:border-blue-400"
+          onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))}
+          onKeyDown={(e) => {
+            commonKeys(e)
+            if (e.key === 'Tab' && !e.shiftKey) {
+              e.preventDefault()
+              if (draft.credit !== '') notesRef.current?.focus()
+              else debitRef.current?.focus()
+            }
+          }}
+          suggestions={descSuggestions}
+          onAccept={(val) => {
+            setDraft((d) => ({ ...d, description: val }))
+            // Advance focus same as Tab — capture credit state from current render
+            const skipDebit = draft.credit !== ''
+            setTimeout(() => {
+              if (skipDebit) notesRef.current?.focus()
+              else debitRef.current?.focus()
+            }, 0)
+          }}
+          className={`${base} border-slate-200 text-sm px-2`}
           placeholder="Description *"
-          autoFocus
           maxLength={255}
         />
       </td>
-      <td className="px-2 py-1 w-10 text-center text-slate-300 text-xs">—</td>
-      <td className="px-2 py-1 w-28">
+
+      {/* Status — excluded from tab order */}
+      <td className="px-2 py-1.5 w-10 text-center text-slate-300 text-xs" tabIndex={-1}>—</td>
+
+      {/* Debit — smart Tab: skip Credit if Debit has a value */}
+      <td className="px-2 py-1.5 w-28">
         <input
+          ref={debitRef}
           type="text"
           value={draft.debit}
           onChange={(e) => handleDebitChange(e.target.value)}
+          onKeyDown={(e) => {
+            commonKeys(e)
+            if (e.key === 'Tab' && !e.shiftKey) {
+              e.preventDefault()
+              if (draft.debit !== '') notesRef.current?.focus()
+              else creditRef.current?.focus()
+            }
+          }}
           disabled={!!draft.credit}
-          className="w-full bg-white border border-slate-200 rounded px-1 text-right tabular-nums text-xs outline-none focus:border-blue-400 disabled:opacity-30"
+          className={`${base}${err} text-right tabular-nums disabled:opacity-30 disabled:cursor-not-allowed`}
           placeholder="Debit"
         />
       </td>
-      <td className="px-2 py-1 w-28">
+
+      {/* Credit — Tab always flows to Notes */}
+      <td className="px-2 py-1.5 w-28">
         <input
+          ref={creditRef}
           type="text"
           value={draft.credit}
           onChange={(e) => handleCreditChange(e.target.value)}
+          onKeyDown={(e) => {
+            commonKeys(e)
+            if (e.key === 'Tab' && !e.shiftKey) {
+              e.preventDefault()
+              notesRef.current?.focus()
+            }
+          }}
           disabled={!!draft.debit}
-          className="w-full bg-white border border-slate-200 rounded px-1 text-right tabular-nums text-xs outline-none focus:border-blue-400 disabled:opacity-30"
+          className={`${base}${err} text-right tabular-nums disabled:opacity-30 disabled:cursor-not-allowed`}
           placeholder="Credit"
         />
       </td>
-      <td className="px-2 py-1 w-32 text-center text-slate-300 text-xs">computed</td>
-      <td className="px-2 py-1 w-40">
-        <input
+
+      {/* Balance — excluded from tab order */}
+      <td className="px-2 py-1.5 w-32 text-center text-slate-300 text-xs" tabIndex={-1}>computed</td>
+
+      {/* Notes — Tab/Enter saves and opens next row; suggestion accept does the same */}
+      <td className="px-2 py-1.5 w-40">
+        <AutocompleteInput
+          ref={notesRef}
           type="text"
           value={draft.notes}
-          onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-          className="w-full bg-white border border-slate-200 rounded px-1 text-xs outline-none focus:border-blue-400"
+          onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+              e.preventDefault()
+              handleSubmit()
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              handleEscape()
+            }
+          }}
+          suggestions={notesSuggestions}
+          onAccept={(val) => {
+            // Pass accepted value directly to handleSubmit so it doesn't read
+            // the stale draft.notes (React state update is async)
+            handleSubmit(val)
+          }}
+          className={`${base} border-slate-200`}
           placeholder='Notes / "Scheduled to be paid on..."'
         />
       </td>
-      <td className="px-2 py-1 flex gap-1">
+
+      {/* Actions */}
+      <td className="px-2 py-1.5 flex gap-1 items-center">
         <button
           onClick={handleSubmit}
+          title="Save and add another (Enter)"
           className="px-2 py-0.5 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
         >
           Save
         </button>
         <button
-          onClick={() => { setActive(false); setDebitCreditError(false) }}
+          onClick={handleEscape}
+          title="Cancel (Esc)"
           className="px-2 py-0.5 bg-slate-200 text-slate-700 text-xs rounded hover:bg-slate-300"
         >
           Cancel
         </button>
       </td>
       {debitCreditError && (
-        <tr>
-          <td colSpan={9} className="px-4 py-1 text-xs text-red-600 bg-red-50">
-            A transaction can only be a debit or a credit — not both.
-          </td>
-        </tr>
+        <td className="px-2 py-1 text-xs text-red-600 whitespace-nowrap">
+          Debit or credit — not both.
+        </td>
       )}
     </tr>
   )

@@ -56,27 +56,22 @@ export function computeAvailableBalance(
 
 /**
  * Compute the full balance summary for a register.
- * is_reconciled = true when all three values converge AND match bank-reported values.
+ * is_reconciled = true when every non-void transaction is cleared (ledger-only).
+ * Bank balance columns are reserved for Phase 3 bank sync and not used here.
  */
 export function computeBalanceSummary(
   openingBalance: number,
   transactions: DbTransaction[],
-  currentBankBal: number | null,
-  availableBankBal: number | null,
 ): BalanceSummary {
   const current_balance = computeCurrentBalance(openingBalance, transactions)
   const available_balance = computeAvailableBalance(openingBalance, transactions)
   const actual_balance = current_balance  // same formula, different UI label
 
-  // Convergence: all three match AND bank values are entered and match
-  const bankValuesEntered = currentBankBal != null && availableBankBal != null
-  const is_reconciled =
-    bankValuesEntered &&
-    floatEq(actual_balance, current_balance) &&
-    floatEq(actual_balance, currentBankBal!) &&
-    floatEq(available_balance, availableBankBal!)
-
+  // Ledger-only convergence: all non-void transactions are cleared.
+  // When that holds, actual_balance === available_balance by definition.
   const nonVoid = transactions.filter((tx) => tx.status !== 'void')
+  const is_reconciled = nonVoid.length > 0 && nonVoid.every((tx) => tx.status === 'cleared')
+
   const unresolved_count = {
     scheduled: nonVoid.filter((tx) => tx.status === 'scheduled').length,
     in_flight: nonVoid.filter((tx) => tx.status === 'in_flight').length,

@@ -7,18 +7,23 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useRegister, useCreateRegister, useUpdateRegister } from '@/hooks/useRegister'
-import { useTransactions, useAddTransaction, useUpdateTransaction, useDeleteTransaction } from '@/hooks/useTransactions'
+import { useTransactions, useAddTransaction, useUpdateTransaction, useUpdateTransactionStatus, useDeleteTransaction } from '@/hooks/useTransactions'
 import { computeBalanceSummary, computeClosingBalance, formatCurrency, currencyEq } from '@/lib/balance'
 import { computeLastClearedRunningBalance, pendingTransactionCount, allTransactionsCleared } from '@/lib/monthStatus'
 import { writeAuditEntry } from '@/lib/audit'
+import { buildReconciliationContext } from '@/lib/reconciliation/buildContext'
+import { runReconciliationSession } from '@/lib/reconciliation/reconciliationService'
 import { useAuthStore } from '@/store/authStore'
 import { useSessionStore } from '@/store/sessionStore'
 import { RegisterHeader } from './RegisterHeader'
 import { TransactionTable } from './TransactionTable'
 import { MonthNav } from './MonthNav'
 import { YearlySummary } from './YearlySummary'
+import { ReconciliationPanel } from '@/components/reconciliation/ReconciliationPanel'
 import { MONTH_NAMES } from '@/types'
 import type { DbAccount, DbRegister, DbTransaction } from '@/types'
+import type { ReconciliationResult, ReconciliationSuggestion } from '@/types/reconciliation'
+import { ReconciliationParseError } from '@/types/reconciliation'
 
 interface RegisterViewProps {
   account: DbAccount
@@ -48,6 +53,11 @@ export function RegisterView({ account }: RegisterViewProps) {
   const [relockError, setRelockError] = useState<string | null>(null)
   // Set to true when a corrupt archived+uncleared state was detected and auto-corrected
   const [wasCorrupted, setWasCorrupted] = useState(false)
+  // AI Reconciliation session — SPEC §13 §14
+  const [isReconciling, setIsReconciling] = useState(false)
+  const [reconcileError, setReconcileError] = useState<string | null>(null)
+  const [reconciliationResult, setReconciliationResult] = useState<ReconciliationResult | null>(null)
+  const [showReconciliationPanel, setShowReconciliationPanel] = useState(false)
   // Inline message shown inside the mismatch prompt when the update is blocked
   const [mismatchArchivedBlocked, setMismatchArchivedBlocked] = useState(false)
 
@@ -69,16 +79,12 @@ export function RegisterView({ account }: RegisterViewProps) {
   const updateRegister = useUpdateRegister()
   const addTransaction = useAddTransaction()
   const updateTransaction = useUpdateTransaction()
+  const updateTransactionStatus = useUpdateTransactionStatus()
   const deleteTransaction = useDeleteTransaction()
 
   // --- Computed values ---
   const balances = register
-    ? computeBalanceSummary(
-        register.opening_balance,
-        transactions,
-        register.current_bank_bal,
-        register.available_bank_bal,
-      )
+    ? computeBalanceSummary(register.opening_balance, transactions)
     : null
 
   const closingBalance: number | null = register
@@ -548,17 +554,109 @@ export function RegisterView({ account }: RegisterViewProps) {
     })
   }
 
-  // --- Bank balance update ---
-  const handleBankBalanceUpdate = useCallback(
-    (currentBankBal: number | null, availableBankBal: number | null) => {
-      if (!register) return
-      updateRegister.mutate({
-        id: register.id,
-        current_bank_bal: currentBankBal,
-        available_bank_bal: availableBankBal,
+  // Bank balance update removed — current_bank_bal / available_bank_bal are
+  // reserved for Phase 3 bank sync and not written from the UI in Phase 1.
+
+  // --- AI Reconciliation session — SPEC §13 §14 ---
+
+  async function handleReconcileClick() {
+    if (!register || !user) return
+    setIsReconciling(true)
+    setReconcileError(null)
+
+    await writeAuditEntry({
+      user_id: user.id,
+      account_id: account.id,
+      register_id: register.id,
+      action: 'reconciliation_session_started',
+    })
+
+    try {
+      const context = buildReconciliationContext(
+        register,
+        account.nickname,
+        transactions,
+        new Date(),
+      )
+      const result = await runReconciliationSession(context)
+      setReconciliationResult(result)
+      setShowReconciliationPanel(true)
+    } catch (err) {
+      const msg =
+        err instanceof ReconciliationParseError
+          ? 'Unable to parse AI response. Please try again.'
+          : err instanceof Error
+            ? err.message
+            : 'Unknown error. Please try again.'
+      setReconcileError(msg)
+    } finally {
+      setIsReconciling(false)
+    }
+  }
+
+  const handleAcceptSuggestion = useCallback(
+    async (suggestion: ReconciliationSuggestion) => {
+      if (!register || !user) return
+      if (suggestion.suggested_status && suggestion.transaction_id) {
+        const tx = transactions.find((t) => t.id === suggestion.transaction_id)
+        if (tx) {
+          await updateTransactionStatus.mutateAsync({
+            id: tx.id,
+            register_id: register.id,
+            status: suggestion.suggested_status,
+          })
+          await writeAuditEntry({
+            user_id: user.id,
+            account_id: account.id,
+            register_id: register.id,
+            transaction_id: tx.id,
+            action: 'ai_suggestion_accepted',
+            field_changed: 'status',
+            value_before: tx.status,
+            value_after: suggestion.suggested_status,
+            reason: suggestion.reasoning,
+          })
+        }
+      }
+      // No-op accept for informational / no-status suggestions
+    },
+    [register, user, account.id, transactions, updateTransactionStatus],
+  )
+
+  const handleIgnoreSuggestion = useCallback(
+    async (suggestion: ReconciliationSuggestion) => {
+      if (!register || !user) return
+      await writeAuditEntry({
+        user_id: user.id,
+        account_id: account.id,
+        register_id: register.id,
+        transaction_id: suggestion.transaction_id ?? undefined,
+        action: 'ai_suggestion_ignored',
+        reason: `${suggestion.id}: ${suggestion.type}`,
       })
     },
-    [register, updateRegister],
+    [register, user, account.id],
+  )
+
+  const handleCloseReconciliationPanel = useCallback(
+    async (stats: { accepted: number; ignored: number }) => {
+      if (register && user) {
+        await writeAuditEntry({
+          user_id: user.id,
+          account_id: account.id,
+          register_id: register.id,
+          action: 'reconciliation_session_completed',
+          value_after: JSON.stringify({
+            accepted: stats.accepted,
+            ignored: stats.ignored,
+            status: reconciliationResult?.summary.status ?? 'unknown',
+          }),
+        })
+      }
+      setShowReconciliationPanel(false)
+      setReconciliationResult(null)
+    },
+    [register, user, account.id, reconciliationResult],
   )
 
   // --- Transaction handlers ---
@@ -682,12 +780,14 @@ export function RegisterView({ account }: RegisterViewProps) {
     <div className="flex flex-col h-full">
       {/* Header */}
       <RegisterHeader
-        register={register}
         balances={balances!}
         accountNickname={account.nickname}
         monthLabel={monthLabel}
-        onBankBalanceUpdate={handleBankBalanceUpdate}
         isLocked={isLocked}
+        monthStatus={register.month_status}
+        isReconciling={isReconciling}
+        reconcileError={reconcileError}
+        onReconcileClick={handleReconcileClick}
       />
 
       {/* Informational carry-forward line — visible while open/ready with pending txns */}
@@ -880,6 +980,20 @@ export function RegisterView({ account }: RegisterViewProps) {
         onNavigate={handleNavigate}
         onYearChange={handleYearChange}
       />
+
+      {/* AI Reconciliation panel — slide-in from right */}
+      {showReconciliationPanel && reconciliationResult && balances && (
+        <ReconciliationPanel
+          monthLabel={monthLabel}
+          accountNickname={account.nickname}
+          result={reconciliationResult}
+          transactions={transactions}
+          gap={balances.gap}
+          onAccept={handleAcceptSuggestion}
+          onIgnore={handleIgnoreSuggestion}
+          onClose={handleCloseReconciliationPanel}
+        />
+      )}
     </div>
   )
 }

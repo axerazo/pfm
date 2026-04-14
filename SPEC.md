@@ -545,15 +545,79 @@ When gaps exist, AI provides a plain-language explanation:
 
 ## 14. AI Layer
 
+### Phase 2 Implementation (complete)
+
+**Model:** `claude-sonnet-4-6` via `@anthropic-ai/sdk`
+**Trigger:** User clicks "Reconcile" button in `RegisterHeader`
+**Mode:** Single API call (no streaming). 30-second timeout.
+**System prompt:** `src/lib/reconciliation/systemPrompt.ts` — single source of truth for AI behavior.
+
+#### File layout
+```
+src/lib/reconciliation/
+  systemPrompt.ts          ← RECONCILIATION_SYSTEM_PROMPT constant
+  buildContext.ts          ← buildReconciliationContext() payload builder
+  reconciliationService.ts ← runReconciliationSession() API call
+src/types/reconciliation.ts ← All Phase 2 reconciliation types
+src/components/reconciliation/
+  ReconciliationPanel.tsx  ← Slide-in results panel
+```
+
+#### Button visibility rules
+| `month_status`   | Button shown? | Disabled? |
+|------------------|---------------|-----------|
+| `open`           | Yes           | Only if all transactions cleared |
+| `ready_to_close` | Yes           | Only if all transactions cleared |
+| `soft_closed`    | No            | — |
+| `hard_closed`    | No            | — |
+
+#### Context payload sent to Claude
+```
+session:         { month, year, today (MM/DD/YYYY), account_nickname }
+balances:        { opening, actual, available, gap }
+summary_counts:  { cleared, pending, scheduled, in_flight, recorded, void, total_non_void }
+transactions[]:  { id, date, description, debit, credit, status, notes,
+                   scheduled_date, days_past_scheduled }
+```
+Void transactions are excluded. Dates converted from ISO to MM/DD/YYYY for readability.
+
+#### AI output schema
+```typescript
+ReconciliationResult {
+  summary: {
+    status: 'reconciled' | 'in_progress' | 'needs_attention'
+    headline: string            // 1-sentence summary
+    gap_explanation: string     // empty string when gap = 0
+    action_count: number        // non-informational suggestion count
+  }
+  suggestions: Array<{
+    id: string                  // "sugg_N"
+    priority: number            // 1 = highest; array sorted ascending
+    type: 'mark_pending' | 'verify_amount' | 'investigate' | 'informational'
+    transaction_id: string | null
+    description: string         // ≤ 80 chars, user-facing
+    reasoning: string           // 1-2 sentences
+    suggested_status: 'pending' | null
+  }>
+  flags: Array<{
+    id: string                  // "flag_N"
+    severity: 'warning' | 'info'
+    type: 'amount_anomaly' | 'duplicate_suspect' | 'long_overdue' | 'missing_confirmation'
+    transaction_id: string | null
+    description: string
+    reasoning: string
+  }>
+  reconciliation_complete: boolean
+}
+```
+
 ### What AI Does in This App
 | Function | Description |
 |---|---|
-| Transaction matching | Matches bank-reported transactions to user ledger entries during reconciliation |
-| Status suggestions | Suggests marking transactions as `pending` or `cleared` based on bank data |
-| Gap explanation | Explains in plain language why balances differ |
-| In-flight prompts | Prompts user when a scheduled payment's date has passed |
-| Discrepancy flagging | Flags anomalies: duplicate amounts, missing entries, unexpected charges |
-| Reconciliation summary | Produces a plain-language reconciliation summary at end of session |
+| Status suggestions | Suggests marking transactions as `pending` based on age and scheduled dates |
+| Gap explanation | Explains in plain language why actual ≠ available balance |
+| Discrepancy flagging | Flags anomalies: duplicate amounts, long-overdue in-flight, missing confirmations |
+| Reconciliation summary | Produces a headline and status (`reconciled` / `in_progress` / `needs_attention`) |
 
 ### What AI Does NOT Do
 - AI does **not** automatically update any transaction status
@@ -564,18 +628,38 @@ When gaps exist, AI provides a plain-language explanation:
 
 ### AI Interaction Model
 ```
-AI SUGGESTS → User sees suggestion with [ Accept ] [ Ignore ] options
-User clicks Accept → status updates, audit entry logged
-User clicks Ignore → suggestion dismissed, no change
+User clicks "Reconcile"
+  → reconciliation_session_started audit entry written
+  → buildReconciliationContext() builds payload
+  → runReconciliationSession() calls Claude API
+  → ReconciliationPanel slides in with results
+
+For each suggestion:
+  Accept → transaction status updated + ai_suggestion_accepted audit entry
+  Ignore → ai_suggestion_ignored audit entry (no data change)
+
+User clicks Done
+  → reconciliation_session_completed audit entry (accepted/ignored counts)
+  → Panel closes; register view returns to full width
 ```
 
-Every AI suggestion that is accepted is logged in the audit trail with `action = 'ai_suggestion_accepted'`.
+### Audit actions (§12)
+| Action | When |
+|---|---|
+| `reconciliation_session_started` | Reconcile button clicked (before API call) |
+| `reconciliation_session_completed` | Done clicked; value_after = `{accepted, ignored, status}` JSON |
+| `ai_suggestion_accepted` | User accepts a suggestion with suggested_status |
+| `ai_suggestion_ignored` | User clicks Ignore |
 
-### AI Integration
-- Anthropic Claude API (claude-sonnet model)
-- Context provided per reconciliation session: current month transactions, bank-reported balances, prior reconciliation state
-- AI responses are structured (JSON) for programmatic suggestion display
-- Natural language summaries rendered as plain text in the UI
+### Error handling
+| Condition | Message shown |
+|---|---|
+| API timeout (> 30s) | "Analysis is taking longer than expected. Please try again." |
+| Parse error | "Unable to parse AI response. Please try again." |
+| API error (non-200) | "Reconciliation service unavailable. Please try again later." |
+| Network failure | "No connection. Please check your network and try again." |
+
+All errors show inline below the Reconcile button with a "Try again" label (re-clicking the button).
 
 ---
 
@@ -716,12 +800,11 @@ const isFullyReconciled =
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Check Register — March 2026                    [Account Name]  │
-├──────────────────────────┬──────────────────────────────────────┤
-│  BANK                    │  YOUR LEDGER                         │
-│  Current     $6,212.80   │  Actual Balance        $3,247.43     │
-│  Available   $5,925.11   │  ← your source of truth             │
-├──────────────────────────┴──────────────────────────────────────┤
-│  ⚠️ Reconciliation needed  |  $2,965.37 gap  |  8 scheduled     │
+├─────────────────────────────────────────────────────────────────┤
+│  $3,247.43  Actual Balance                                      │
+│  $3,101.20  Available Balance                                   │
+├─────────────────────────────────────────────────────────────────┤
+│  ⚠️ Reconciliation needed  |  $146.23 gap  |  8 scheduled       │
 │     1 pending  |  0 unsynced                                     │
 ├─────────────────────────────────────────────────────────────────┤
 │  [Check#] [Date] [Description──────────────] [S] [-] [+] [Bal] │
@@ -733,20 +816,23 @@ const isFullyReconciled =
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Header — Balance Display
-- **Bank column** (left): Current Balance + Available Balance (bank-reported, user-entered during reconciliation)
-- **Ledger column** (right): Actual Balance (computed, always prominent)
-- Actual Balance receives the strongest visual weight — largest, boldest
-- Reconciliation status bar below the two balance columns
+### Header — Balance Display (Phase 1)
+- **Single column**, two computed ledger values — no bank input fields
+- **Actual Balance** (large, bold, green/red): opening + all non-void debits/credits — the user's source of truth
+- **Available Balance** (secondary): opening + cleared debits/credits only — what is confirmed settled
+- Bank balance input fields (`current_bank_bal`, `available_bank_bal`) are reserved for **Phase 3 bank sync** and are not displayed in Phase 1. The columns exist in the database but are not read or written from the UI.
 
 ### Reconciliation Status Bar
 ```
 When unreconciled:
 ⚠️ Reconciliation needed  ·  $X,XXX.XX gap  ·  N scheduled  ·  N pending
 
-When reconciled:
-✅ Fully reconciled — all balances match
+When reconciled (all non-void transactions cleared):
+✅ Fully reconciled — all transactions cleared
 ```
+- `is_reconciled` = all non-void transactions have status `cleared` (AND at least one exists)
+- When true, Actual Balance = Available Balance by definition (same computation)
+- No bank comparison required in Phase 1
 
 ### Row Visual States
 | Status | Row Treatment |

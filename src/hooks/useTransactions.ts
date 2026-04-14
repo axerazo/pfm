@@ -19,7 +19,16 @@ export function useTransactions(registerId: string | null | undefined) {
         .eq('register_id', registerId)
         .order('row_order', { ascending: true })
       if (error) throw error
-      return (data ?? []) as DbTransaction[]
+      const rows = (data ?? []) as DbTransaction[]
+      // Promote scheduled → in_flight at read time for any past-due scheduled date.
+      // deriveStatus only runs on writes, so rows saved before their date passed remain
+      // stale in the DB. This ensures the UI always reflects the correct live status.
+      return rows.map((tx) => {
+        if (tx.status === 'scheduled' && isInFlight(tx.scheduled_date)) {
+          return { ...tx, status: 'in_flight' as DbTransaction['status'] }
+        }
+        return tx
+      })
     },
   })
 }

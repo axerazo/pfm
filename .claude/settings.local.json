@@ -6,7 +6,11 @@
       "Bash(npx create-vite@latest pfm-app --template react-ts)",
       "Bash(npm install:*)",
       "Bash(npx tsc:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Skill(claude-api)",
+      "Bash(ls /c/workspace/pfm/.env*)",
+      "Bash(node:*)",
+      "Bash(npx vite:*)"
     ]
   }
 }

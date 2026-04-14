@@ -1,110 +1,55 @@
 // ============================================================
 // RegisterHeader — SPEC §16 balance display + reconciliation bar
-// Bank column (left): Current Balance + Available Balance
-// Ledger column (right): Actual Balance (heaviest visual weight)
+//
+// Displays two computed ledger balances only (Option A):
+//   Actual Balance   = opening + all non-void debits/credits
+//   Available Balance = opening + cleared debits/credits only
+//
+// Bank balance inputs are reserved for Phase 3 bank sync
+// and are not shown here. current_bank_bal / available_bank_bal
+// columns remain in the DB but are not read or written from UI.
+//
+// is_reconciled fires when every non-void transaction is cleared
+// (actual_balance === available_balance at that point).
+//
+// Reconcile button — SPEC §14:
+//   Visible: month_status open or ready_to_close
+//   Disabled: is_reconciled = true (nothing to analyze)
+//   Hidden: soft_closed or hard_closed
 // ============================================================
 
-import { useState, useEffect } from 'react'
 import { formatCurrency } from '@/lib/balance'
-import type { BalanceSummary, DbRegister } from '@/types'
+import type { BalanceSummary, MonthStatus } from '@/types'
 
 interface RegisterHeaderProps {
-  register: DbRegister
   balances: BalanceSummary
   accountNickname: string
   monthLabel: string
-  onBankBalanceUpdate: (currentBankBal: number | null, availableBankBal: number | null) => void
   isLocked: boolean
-}
-
-/** Parse a raw string to a number, stripping $ and commas. Returns null if empty or invalid. */
-function parseBankInput(raw: string): number | null {
-  const stripped = raw.replace(/[$,\s]/g, '')
-  if (stripped === '') return null
-  const n = parseFloat(stripped)
-  return isNaN(n) ? null : Math.round(n * 100) / 100
-}
-
-/** Format a saved number for display. Empty string when null. */
-function displayValue(n: number | null): string {
-  return n != null ? formatCurrency(n) : ''
-}
-
-interface BankFieldProps {
-  label: string
-  savedValue: number | null
-  disabled: boolean
-  onCommit: (value: number | null) => void
-}
-
-function BankField({ label, savedValue, disabled, onCommit }: BankFieldProps) {
-  const [focused, setFocused] = useState(false)
-  // While focused: show raw numeric string for easy editing
-  // While blurred: show formatted currency string
-  const [raw, setRaw] = useState(savedValue != null ? String(savedValue) : '')
-
-  // Sync when the saved value changes externally (e.g. another session or undo)
-  useEffect(() => {
-    if (!focused) {
-      setRaw(savedValue != null ? String(savedValue) : '')
-    }
-  }, [savedValue, focused])
-
-  function handleFocus() {
-    // Strip formatting so the user edits a plain number
-    setRaw(savedValue != null ? String(savedValue) : '')
-    setFocused(true)
-  }
-
-  function handleBlur() {
-    setFocused(false)
-    const parsed = parseBankInput(raw)
-    onCommit(parsed)
-    // Show formatted value immediately after blur
-    setRaw(parsed != null ? String(parsed) : '')
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Enter') {
-      e.currentTarget.blur()
-    }
-  }
-
-  const displayedValue = focused ? raw : displayValue(savedValue)
-
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-xs text-slate-400">{label}</span>
-      <input
-        type="text"
-        inputMode="decimal"
-        disabled={disabled}
-        value={displayedValue}
-        onChange={(e) => setRaw(e.target.value)}
-        onFocus={handleFocus}
-        onBlur={handleBlur}
-        onKeyDown={handleKeyDown}
-        placeholder="—"
-        className="w-32 text-right text-sm bg-transparent border-b border-slate-600 focus:border-blue-400 outline-none text-white placeholder:text-slate-600 disabled:opacity-40 tabular-nums"
-        aria-label={`Bank ${label.toLowerCase()} balance`}
-      />
-    </div>
-  )
+  monthStatus?: MonthStatus
+  isReconciling?: boolean
+  reconcileError?: string | null
+  onReconcileClick?: () => void
 }
 
 export function RegisterHeader({
-  register,
   balances,
   accountNickname,
   monthLabel,
-  onBankBalanceUpdate,
   isLocked,
+  monthStatus,
+  isReconciling = false,
+  reconcileError = null,
+  onReconcileClick,
 }: RegisterHeaderProps) {
-  const { current_balance, available_balance, actual_balance, is_reconciled, unresolved_count, gap } =
-    balances
+  const { actual_balance, available_balance, is_reconciled, unresolved_count, gap } = balances
 
-  const unresolvedTotal =
-    unresolved_count.scheduled + unresolved_count.in_flight + unresolved_count.pending
+  // Show the Reconcile button only for open/ready-to-close months
+  const showReconcileButton =
+    onReconcileClick != null &&
+    (monthStatus === 'open' || monthStatus === 'ready_to_close')
+
+  const reconcileDisabled = is_reconciled || isReconciling
 
   return (
     <div className="bg-slate-900 text-white">
@@ -113,48 +58,61 @@ export function RegisterHeader({
         <h1 className="text-base font-semibold tracking-wide">
           Check Register — {monthLabel}
         </h1>
-        <span className="text-sm text-slate-400">{accountNickname}</span>
+        <div className="flex items-center gap-3">
+          {showReconcileButton && (
+            <div className="flex flex-col items-end gap-0.5">
+              <button
+                onClick={onReconcileClick}
+                disabled={reconcileDisabled}
+                className={`text-xs px-3 py-1 rounded font-medium transition-colors ${
+                  reconcileDisabled
+                    ? 'bg-slate-600 text-slate-400 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
+                title={is_reconciled ? 'All transactions are cleared' : 'Run AI reconciliation analysis'}
+              >
+                {isReconciling ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Analyzing…
+                  </span>
+                ) : (
+                  'Reconcile'
+                )}
+              </button>
+              {reconcileError && (
+                <span className="text-xs text-red-400 max-w-[180px] text-right leading-tight">
+                  {reconcileError}
+                </span>
+              )}
+            </div>
+          )}
+          <span className="text-sm text-slate-400">{accountNickname}</span>
+        </div>
       </div>
 
-      {/* Balance columns */}
-      <div className="grid grid-cols-2 divide-x divide-slate-700">
-        {/* Left: Bank-reported (reconciliation targets) */}
-        <div className="px-4 py-3 space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-2">
-            Bank
-          </p>
-          <BankField
-            label="Current"
-            savedValue={register.current_bank_bal}
-            disabled={isLocked}
-            onCommit={(val) => onBankBalanceUpdate(val, register.available_bank_bal)}
-          />
-          <BankField
-            label="Available"
-            savedValue={register.available_bank_bal}
-            disabled={isLocked}
-            onCommit={(val) => onBankBalanceUpdate(register.current_bank_bal, val)}
-          />
+      {/* Balance display — single column, two values */}
+      <div className="px-4 py-3 space-y-1">
+        {/* Actual Balance — primary, largest */}
+        <div className="flex items-baseline gap-3">
+          <span
+            className="text-2xl font-bold tabular-nums"
+            style={{ color: actual_balance >= 0 ? '#4ade80' : '#f87171' }}
+          >
+            {formatCurrency(actual_balance)}
+          </span>
+          <span className="text-xs text-slate-400">Actual Balance</span>
         </div>
 
-        {/* Right: Your ledger (source of truth) */}
-        <div className="px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-2">
-            Your Ledger
-          </p>
-          <div className="flex items-baseline gap-3">
-            <span
-              className="text-2xl font-bold tabular-nums"
-              style={{ color: actual_balance >= 0 ? '#4ade80' : '#f87171' }}
-            >
-              {formatCurrency(actual_balance)}
-            </span>
-            <span className="text-xs text-slate-400">actual balance</span>
-          </div>
-          <div className="mt-1 flex gap-4 text-xs text-slate-500">
-            <span>Current: {formatCurrency(current_balance)}</span>
-            <span>Available: {formatCurrency(available_balance)}</span>
-          </div>
+        {/* Available Balance — secondary */}
+        <div className="flex items-baseline gap-3">
+          <span
+            className="text-base font-semibold tabular-nums"
+            style={{ color: available_balance >= 0 ? '#86efac' : '#fca5a5' }}
+          >
+            {formatCurrency(available_balance)}
+          </span>
+          <span className="text-xs text-slate-500">Available Balance</span>
         </div>
       </div>
 
@@ -167,7 +125,7 @@ export function RegisterHeader({
         }`}
       >
         {is_reconciled ? (
-          <span>✅ Fully reconciled — all balances match</span>
+          <span>✅ Fully reconciled — all transactions cleared</span>
         ) : (
           <>
             <span>⚠️ Reconciliation needed</span>
@@ -187,9 +145,6 @@ export function RegisterHeader({
             )}
             {unresolved_count.recorded > 0 && (
               <span>{unresolved_count.recorded} unsynced</span>
-            )}
-            {unresolvedTotal === 0 && gap === 0 && (
-              <span className="text-slate-400">Enter bank balances above to reconcile</span>
             )}
           </>
         )}
