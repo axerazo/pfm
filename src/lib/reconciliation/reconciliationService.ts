@@ -10,6 +10,56 @@ import { ReconciliationParseError } from '@/types/reconciliation'
 
 const TIMEOUT_MS = 30_000
 
+/**
+ * Walk the cleaned response character-by-character to extract every top-level
+ * JSON object, then return the last one that has the required ReconciliationResult
+ * shape. This handles the "self-correction" pattern where the model emits prose
+ * followed by a second, corrected JSON object — regex-based extraction breaks on
+ * nested objects inside the prose.
+ */
+function extractLastValidResult(raw: string): ReconciliationResult {
+  const cleaned = raw
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/g, '')
+
+  const candidates: string[] = []
+  let depth = 0
+  let start = -1
+
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned[i] === '{') {
+      if (depth === 0) start = i
+      depth++
+    } else if (cleaned[i] === '}') {
+      depth--
+      if (depth === 0 && start !== -1) {
+        candidates.push(cleaned.slice(start, i + 1))
+        start = -1
+      }
+    }
+  }
+
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    try {
+      const obj = JSON.parse(candidates[i])
+      if (
+        obj.summary &&
+        typeof obj.summary.status === 'string' &&
+        Array.isArray(obj.suggestions) &&
+        Array.isArray(obj.flags) &&
+        typeof obj.reconciliation_complete === 'boolean'
+      ) {
+        return obj as ReconciliationResult
+      }
+    } catch {
+      // malformed block — try the next candidate
+    }
+  }
+
+  console.error('[reconciliation] No valid ReconciliationResult found. Raw response:', raw)
+  throw new ReconciliationParseError(raw)
+}
+
 function getClient(): Anthropic {
   const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined
   if (!apiKey) {
@@ -66,29 +116,7 @@ export async function runReconciliationSession(
     clearTimeout(timeoutId)
   }
 
-  // Strip accidental markdown fences the model may emit
-  const clean = rawText
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```\s*$/, '')
-    .trim()
-
-  let result: ReconciliationResult
-  try {
-    result = JSON.parse(clean) as ReconciliationResult
-  } catch {
-    console.error('[reconciliation] Parse error — raw response:', clean)
-    throw new ReconciliationParseError(clean) as ParseErrorType
-  }
-
-  // Minimal shape guard — ensure arrays are present
-  if (!result.summary || typeof result.summary.headline !== 'string') {
-    throw new ReconciliationParseError(clean)
-  }
-  if (!Array.isArray(result.suggestions)) result.suggestions = []
-  if (!Array.isArray(result.flags)) result.flags = []
-  if (typeof result.reconciliation_complete !== 'boolean') {
-    result.reconciliation_complete = false
-  }
-
-  return result
+  // Brace-matched extraction handles multi-object responses and nested structures.
+  // The shape guard is inside extractLastValidResult — no further checks needed.
+  return extractLastValidResult(rawText)
 }

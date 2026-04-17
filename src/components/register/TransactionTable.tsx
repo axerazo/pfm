@@ -23,6 +23,7 @@ interface TransactionTableProps {
     credit?: number | null
     check_number?: number | null
     notes?: string | null
+    scheduled_date?: string | null
   }) => void
   onOpeningBalanceChange: (newBalance: number) => void
 }
@@ -66,6 +67,7 @@ export function TransactionTable({
             <th className="px-3 py-3 text-right w-32 whitespace-nowrap">Credit (+)</th>
             <th className="px-3 py-3 text-right w-36 whitespace-nowrap">Balance</th>
             <th className="px-3 py-3 text-left w-44 whitespace-nowrap">Notes</th>
+            <th className="px-3 py-3 text-left w-32 whitespace-nowrap">Sched. Date</th>
           </tr>
           {/* Opening balance row — sticky directly below column headers */}
           <tr className="group/ob bg-slate-200 border-b border-slate-300 text-xs text-slate-600 font-medium">
@@ -145,7 +147,7 @@ export function TransactionTable({
           )}
           {atLimit && !isLocked && (
             <tr>
-              <td colSpan={9} className="px-4 py-2 text-xs text-amber-600 text-center">
+              <td colSpan={10} className="px-4 py-2 text-xs text-amber-600 text-center">
                 Maximum of {MAX_ROWS} transactions per month reached.
               </td>
             </tr>

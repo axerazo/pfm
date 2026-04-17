@@ -1,13 +1,14 @@
 // ============================================================
 // TransactionRow — inline-editable register row (SPEC §6, §7, §11)
 // Autosave on blur/Enter. Debit/credit mutually exclusive.
-// Scheduled auto-trigger fires in real time from notes field.
+// Scheduled date is set via dedicated date picker (Column J).
+// scheduled_date column is the single source of truth.
 // ============================================================
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { StatusIcon, statusRowClass } from '@/components/ui/StatusIcon'
 import { AutocompleteInput } from '@/components/ui/AutocompleteInput'
-import { formatCurrency, parseCurrencyInput, detectScheduledPhrase } from '@/lib/balance'
+import { formatCurrency, parseCurrencyInput } from '@/lib/balance'
 import { useSuggestions, invalidateSuggestionCache } from '@/hooks/useSuggestions'
 import type { Transaction, TransactionStatus } from '@/types'
 
@@ -18,7 +19,7 @@ function formatDate(dateStr: string): string {
   return `${mm}/${dd}/${d.getFullYear()}`
 }
 
-const STATUS_OPTIONS: { value: TransactionStatus; label: string }[] = [
+const BASE_STATUS_OPTIONS: { value: TransactionStatus; label: string }[] = [
   { value: 'recorded', label: 'Recorded' },
   { value: 'pending', label: 'Pending' },
   { value: 'cleared', label: 'Cleared' },
@@ -41,6 +42,7 @@ interface EditState {
   debit: string
   credit: string
   notes: string
+  scheduled_date: string  // '' when null; stored as YYYY-MM-DD
 }
 
 function toEditState(tx: Transaction): EditState {
@@ -51,6 +53,7 @@ function toEditState(tx: Transaction): EditState {
     debit: tx.debit != null ? String(tx.debit) : '',
     credit: tx.credit != null ? String(tx.credit) : '',
     notes: tx.notes ?? '',
+    scheduled_date: tx.scheduled_date ?? '',
   }
 }
 
@@ -58,7 +61,9 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
   const [editing, setEditing] = useState<EditState | null>(null)
   const [debitCreditError, setDebitCreditError] = useState(false)
   const [statusMenuOpen, setStatusMenuOpen] = useState(false)
+  const [schedToast, setSchedToast] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const schedToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const statusMenuRef = useRef<HTMLDivElement>(null)
 
   // Autocomplete suggestions — hooks called unconditionally; return [] when editing is null
@@ -107,6 +112,12 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
         ? parseInt(state.check_number, 10)
         : null
 
+      // Detect scheduled_date being cleared so we can notify the user
+      const clearingScheduledDate = !state.scheduled_date && !!tx.scheduled_date
+      const willAutoReset =
+        clearingScheduledDate &&
+        (tx.status === 'scheduled' || tx.status === 'in_flight')
+
       onSave(tx.id, {
         check_number: checkNum && checkNum > 0 ? checkNum : null,
         date: state.date,
@@ -114,11 +125,19 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
         debit: debit ?? null,
         credit: credit ?? null,
         notes: state.notes.trim() || null,
+        scheduled_date: state.scheduled_date || null,
       })
+
+      if (willAutoReset) {
+        if (schedToastTimerRef.current) clearTimeout(schedToastTimerRef.current)
+        setSchedToast(true)
+        schedToastTimerRef.current = setTimeout(() => setSchedToast(false), 4000)
+      }
+
       invalidateSuggestionCache(accountId)
       setEditing(null)
     },
-    [tx.id, onSave, accountId],
+    [tx.id, tx.scheduled_date, tx.status, onSave, accountId],
   )
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -168,10 +187,17 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
     }
   }
 
-  // Detect scheduled auto-trigger in real time from notes field
-  const notesTriggersScheduled = editing
-    ? detectScheduledPhrase(editing.notes)
-    : false
+  // Show scheduled icon preview when scheduled_date is set
+  const hasScheduledDate = editing ? editing.scheduled_date !== '' : !!tx.scheduled_date
+
+  // Show 'Scheduled' option in status dropdown only when a scheduled_date is set
+  const statusOptions = hasScheduledDate
+    ? [
+        { value: 'recorded' as TransactionStatus, label: 'Recorded' },
+        { value: 'scheduled' as TransactionStatus, label: 'Scheduled' },
+        ...BASE_STATUS_OPTIONS.slice(1),
+      ]
+    : BASE_STATUS_OPTIONS
 
   const display = editing ?? toEditState(tx)
 
@@ -262,7 +288,7 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
               `}
               title={`Status: ${tx.status} — click to change`}
             >
-              {editing && notesTriggersScheduled ? (
+              {editing && hasScheduledDate ? (
                 <StatusIcon status="scheduled" className="w-5 h-5" />
               ) : tx.status === 'recorded' ? (
                 <span className="text-slate-300 text-xs leading-none">○</span>
@@ -273,7 +299,7 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
           ) : (
             /* Locked or void — just show the icon, no button */
             <span className="flex items-center justify-center w-8 h-8">
-              {editing && notesTriggersScheduled ? (
+              {editing && hasScheduledDate ? (
                 <StatusIcon status="scheduled" className="w-5 h-5" />
               ) : (
                 <StatusIcon status={tx.status} className="w-5 h-5" />
@@ -284,7 +310,7 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
           {/* Dropdown menu — click-triggered, stays open until selection or outside click */}
           {statusMenuOpen && (
             <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-50 bg-white shadow-xl rounded-lg border border-slate-200 py-1 min-w-[140px]">
-              {STATUS_OPTIONS.map((opt) => (
+              {statusOptions.map((opt) => (
                 <button
                   key={opt.value}
                   type="button"
@@ -370,16 +396,50 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
             suggestions={notesSuggestions}
             onAccept={(val) => setEditing((s) => s ? { ...s, notes: val } : s)}
             className="w-full bg-transparent border-b border-blue-400 outline-none text-xs text-slate-500"
-            placeholder='e.g. "Scheduled to be paid on 04/15/2026"'
+            placeholder="Notes / Confirmation number..."
           />
         ) : (
           <span className="text-xs text-slate-400 truncate block">{tx.notes ?? ''}</span>
         )}
       </td>
 
+      {/* Sched. Date — Column J */}
+      <td className="px-3 py-2 w-32">
+        {editing ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="date"
+              value={display.scheduled_date}
+              onChange={(e) => setEditing({ ...editing, scheduled_date: e.target.value })}
+              onBlur={handleBlur}
+              onFocus={handleFocus}
+              className="w-full bg-transparent border-b border-blue-400 outline-none text-xs"
+            />
+            {display.scheduled_date && (
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  // Prevent the blur on the date input from firing first
+                  e.preventDefault()
+                  setEditing({ ...editing, scheduled_date: '' })
+                }}
+                className="text-slate-400 hover:text-red-500 text-base leading-none shrink-0"
+                title="Clear scheduled date"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs tabular-nums text-slate-500">
+            {tx.scheduled_date ? formatDate(tx.scheduled_date) : ''}
+          </span>
+        )}
+      </td>
+
       {/* Inline error overlay */}
       {debitCreditError && editing && (
-        <td colSpan={9} className="px-2 py-1 text-xs text-red-600 bg-red-50">
+        <td colSpan={10} className="px-2 py-1 text-xs text-red-600 bg-red-50">
           A transaction can only be a debit or a credit — not both. Please enter one or the other.
         </td>
       )}
@@ -388,6 +448,13 @@ export function TransactionRow({ transaction: tx, rowIndex, isLocked, accountId,
       {tx.status === 'in_flight' && (
         <td className="px-2 py-1 text-xs text-amber-700 italic">
           Payment date passed — awaiting bank confirmation
+        </td>
+      )}
+
+      {/* Scheduled date cleared toast */}
+      {schedToast && (
+        <td className="px-2 py-1 text-xs text-blue-700 italic">
+          Scheduled date removed — status reset to recorded
         </td>
       )}
     </tr>
@@ -412,6 +479,7 @@ interface NewTransactionRowProps {
     credit?: number | null
     check_number?: number | null
     notes?: string | null
+    scheduled_date?: string | null
   }) => void
 }
 
@@ -421,7 +489,7 @@ function todayIso() {
 }
 
 function blankDraft(): EditState {
-  return { check_number: '', date: todayIso(), description: '', debit: '', credit: '', notes: '' }
+  return { check_number: '', date: todayIso(), description: '', debit: '', credit: '', notes: '', scheduled_date: '' }
 }
 
 export function NewTransactionRow({
@@ -436,12 +504,13 @@ export function NewTransactionRow({
   const [debitCreditError, setDebitCreditError] = useState(false)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
 
-  const rowRef    = useRef<HTMLTableRowElement>(null)
-  const dateRef   = useRef<HTMLInputElement>(null)
-  const descRef   = useRef<HTMLInputElement>(null)
-  const debitRef  = useRef<HTMLInputElement>(null)
-  const creditRef = useRef<HTMLInputElement>(null)
-  const notesRef  = useRef<HTMLInputElement>(null)
+  const rowRef          = useRef<HTMLTableRowElement>(null)
+  const dateRef         = useRef<HTMLInputElement>(null)
+  const descRef         = useRef<HTMLInputElement>(null)
+  const debitRef        = useRef<HTMLInputElement>(null)
+  const creditRef       = useRef<HTMLInputElement>(null)
+  const notesRef        = useRef<HTMLInputElement>(null)
+  const schedDateRef    = useRef<HTMLInputElement>(null)
 
   // Autocomplete — only fires when 2+ chars typed; returns [] otherwise
   const descSuggestions  = useSuggestions(accountId, 'description', draft.description)
@@ -504,7 +573,8 @@ export function NewTransactionRow({
       debit: debit ?? null,
       credit: credit ?? null,
       check_number: draft.check_number ? parseInt(draft.check_number, 10) : null,
-      notes: notesVal.trim() || null,
+      notes: (notesVal ?? '').trim() || null,
+      scheduled_date: draft.scheduled_date || null,
     })
     invalidateSuggestionCache(accountId)
     resetAndContinue()
@@ -695,13 +765,41 @@ export function NewTransactionRow({
       {/* Balance — excluded from tab order */}
       <td className="px-2 py-1.5 w-32 text-center text-slate-300 text-xs" tabIndex={-1}>computed</td>
 
-      {/* Notes — Tab/Enter saves and opens next row; suggestion accept does the same */}
+      {/* Notes — Tab advances to Sched. Date; Enter saves */}
       <td className="px-2 py-1.5 w-40">
         <AutocompleteInput
           ref={notesRef}
           type="text"
           value={draft.notes}
           onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              handleSubmit()
+            } else if (e.key === 'Tab' && !e.shiftKey) {
+              e.preventDefault()
+              schedDateRef.current?.focus()
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              handleEscape()
+            }
+          }}
+          suggestions={notesSuggestions}
+          onAccept={(val) => {
+            handleSubmit(val)
+          }}
+          className={`${base} border-slate-200`}
+          placeholder="Notes / Confirmation number..."
+        />
+      </td>
+
+      {/* Sched. Date — Tab/Enter saves */}
+      <td className="px-2 py-1.5 w-28">
+        <input
+          ref={schedDateRef}
+          type="date"
+          value={draft.scheduled_date}
+          onChange={(e) => setDraft((d) => ({ ...d, scheduled_date: e.target.value }))}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
               e.preventDefault()
@@ -711,21 +809,14 @@ export function NewTransactionRow({
               handleEscape()
             }
           }}
-          suggestions={notesSuggestions}
-          onAccept={(val) => {
-            // Pass accepted value directly to handleSubmit so it doesn't read
-            // the stale draft.notes (React state update is async)
-            handleSubmit(val)
-          }}
           className={`${base} border-slate-200`}
-          placeholder='Notes / "Scheduled to be paid on..."'
         />
       </td>
 
       {/* Actions */}
       <td className="px-2 py-1.5 flex gap-1 items-center">
         <button
-          onClick={handleSubmit}
+          onClick={() => handleSubmit()}
           title="Save and add another (Enter)"
           className="px-2 py-0.5 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
         >

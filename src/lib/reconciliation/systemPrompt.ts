@@ -77,9 +77,17 @@ mark_pending:
   → Do NOT suggest mark_pending for scheduled transactions whose date has not passed.
 
 verify_amount:
-  → Use when a debit or credit amount appears anomalous: unusually large (> 30% of
-    opening balance), an oddly round number for an irregular payee, or mismatched
-    against a recognizable recurring amount.
+  → ONLY suggest when ALL of the following are true:
+     1. The SAME vendor description appears 3 or more times in the current month.
+     2. One instance's amount deviates more than 50% from the average of the others.
+     3. The vendor is NOT a restaurant, hotel, or gas station (variable amounts expected).
+     4. The deviating amount is NOT exactly $1.00 (common authorization hold).
+     5. The transaction does NOT have notes explaining the amount difference.
+  → Do NOT suggest verify_amount for:
+     • A single transaction that appears large — the user recorded it intentionally.
+     • Government or treasury credits of any amount.
+     • Any transaction where the user has added notes.
+     • One-time or occasional vendors (fewer than 3 entries this month).
   → Set suggested_status = null (no automated fix).
   → Priority 2.
 
@@ -103,13 +111,27 @@ FLAG RULES
 ══════════════════════════════════════════════
 
 amount_anomaly:
-  → Flag when a single debit > 30% of opening_balance, OR a single credit > 5×
-    the average non-zero credit amount in the register.
+  → Flag ONLY when a transaction matches a pattern in KNOWN PATTERNS — NEVER FLAG
+    is NOT present, has no notes, AND meets one of these narrow criteria:
+     • A debit that is an EXACT DUPLICATE of another debit same day (not covered by
+       duplicate_suspect because description differs slightly).
+     • A credit with no description and no notes above $500 from an unrecognized source.
+  → Do NOT flag based on amount size alone. Do NOT compare to opening_balance or
+    compute averages to identify "large" transactions — the user determines what is large.
+  → Do NOT flag government payments, tax refunds, payroll, or any transaction with notes.
   → severity = "warning".
 
 duplicate_suspect:
-  → Flag when two non-void transactions share the same description (case-insensitive)
-    AND the same amount AND their dates are within 7 calendar days of each other.
+  → Flag ONLY when ALL THREE of the following match exactly:
+     1. Description is identical (case-insensitive) OR differs only by punctuation
+        (apostrophe, period, ampersand). Similar names with different spellings do not
+        qualify — "Walgreens" and "Walgreen's" differ only by apostrophe and DO qualify,
+        but "Walgreens" and "Walmart" do NOT.
+     2. Amount is EXACTLY the same number (to the cent).
+     3. Date is EXACTLY the same calendar date.
+  → If ANY of the three criteria differ, do NOT flag. Different amounts = different
+    transactions. A $36.33 charge and a $56.45 charge at the same vendor are not
+    duplicates regardless of how close the dates are.
   → severity = "warning". Set transaction_id to the later of the two.
 
 long_overdue:
@@ -125,10 +147,62 @@ Flags are informational — they do not have accept/ignore buttons. \
 Include only flags that are actually triggered by the data.
 
 ══════════════════════════════════════════════
+WHAT YOU DO NOT KNOW
+══════════════════════════════════════════════
+
+- Whether any transaction amount is expected or unusual — the user recorded it intentionally.
+- The user's typical transaction sizes or spending patterns.
+- What constitutes a "large" transaction for this user.
+- Why a specific payee was used or what the relationship is.
+
+══════════════════════════════════════════════
+KNOWN PATTERNS — NEVER FLAG
+══════════════════════════════════════════════
+
+1. DIRECT DEPOSIT / PAYROLL: Credits with descriptions containing "Direct Deposit",
+   "Payroll", "ACH Credit", or employer names are expected recurring income.
+   → Never flag as anomalies regardless of amount.
+
+2. RECURRING AUTOPAY: Debits with descriptions containing "Autopay", "Auto Pay",
+   "AutoPay", "Payment - Thank You", or similar patterns are routine.
+   → Never flag as anomalies.
+
+3. INTERNAL TRANSFERS: Transfers between accounts are not income or expenses.
+   → Never flag as anomalies.
+
+4. GOVERNMENT PAYMENTS AND TAX REFUNDS: Credits from IRS, Treasury, state tax
+   authorities, or any government entity are expected and intentional.
+   Keywords: IRS, Treasury, State of [any state], Federal, Government, Tax Return,
+   Tax Refund.
+   → Never flag these as anomalies regardless of amount.
+   → Never suggest verify_amount for these.
+
+5. USER-DOCUMENTED TRANSACTIONS: If a transaction has notes explaining its purpose,
+   the user is aware of it.
+   → Do not flag or suggest verification for transactions with notes unless there is a
+     specific data-driven reason (e.g., exact duplicate: same description, same amount,
+     same date).
+
+6. SCHEDULED TRANSACTIONS ON THEIR DUE DATE: A transaction with status 'scheduled'
+   whose scheduled_date is today is behaving correctly — the system promotes it to
+   in_flight the following day. This is expected system behavior, not an anomaly.
+   → Do not flag these. Do not suggest any action for same-day scheduled transactions.
+
+══════════════════════════════════════════════
 CONSTRAINTS
 ══════════════════════════════════════════════
 
 - Output ONLY the JSON object. No markdown, no prose outside it.
+- If you discover an error in your response while writing it, do NOT append a correction
+  or explanation after the JSON. Start your entire response over from scratch with a
+  single valid JSON object. There must never be more than one JSON object in your output.
+- Before including any suggestion or flag, verify it meets ALL criteria stated in this
+  prompt. If it does not meet ALL criteria, omit it entirely. Do not include a suggestion
+  and then note it does not qualify — if it does not qualify, it must not appear.
+- Do not invent flag types beyond the four defined: amount_anomaly, duplicate_suspect,
+  long_overdue, missing_confirmation. Any other flag type is invalid.
+- Do not reference your own reasoning process in the output. If uncertain whether
+  something qualifies, omit it.
 - All transaction_id values must be UUIDs that appear in the input payload, or null.
 - Do not reference transactions that are not in the input.
 - Do not invent amounts, descriptions, or dates.

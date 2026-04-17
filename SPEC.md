@@ -169,7 +169,8 @@ Users can manage one or more bank accounts. Each account has its own independent
 | F | Debit (–) | Decimal(2) | Conditional | Positive numbers only; mutually exclusive with G |
 | G | Credit (+) | Decimal(2) | Conditional | Positive numbers only; mutually exclusive with F |
 | H | Balance | Decimal(2) | — | **COMPUTED — never stored, never editable** |
-| I | Notes / Memos | String | No | Free text; triggers scheduled status auto-rule |
+| I | Notes / Memos | String | No | Free text only; confirmation numbers, descriptions, user notes |
+| J | Sched. Date | Date | No | User-set via date picker in edit mode; drives scheduled/in_flight status automatically; stored as YYYY-MM-DD; single source of truth for all scheduling behavior |
 
 ---
 
@@ -182,8 +183,8 @@ Every transaction row has exactly one status at any time. Status is displayed in
 | Status | Icon | Color | Source | Meaning |
 |---|---|---|---|---|
 | `recorded` | *(blank)* | — | User entry | Row has debit or credit entered; not yet synced with bank |
-| `scheduled` | `scheduled.svg` | Red ❗ | **Automatic** | Notes/Memos contains "Scheduled to be paid on"; see auto-trigger rule |
-| `in_flight` | `scheduled.svg` | Red ❗ + amber row tint | **Automatic** | Scheduled date has passed; awaiting bank confirmation |
+| `scheduled` | `scheduled.svg` | Red ❗ | **Automatic** | `scheduled_date` column is set and date is today or in the future |
+| `in_flight` | `scheduled.svg` | Red ❗ + amber row tint | **Automatic** | `scheduled_date` is set and that date has passed; awaiting bank confirmation |
 | `pending` | `pending.svg` | Yellow ⚠️ | User action (AI may suggest) | Bank reports transaction as in-process / incoming |
 | `cleared` | `cleared.svg` | Green ✅ | User action (AI may suggest) | Bank has fully posted and settled the transaction |
 | `void` | *(struck through)* | Gray | User action | Transaction cancelled; excluded from all calculations |
@@ -325,34 +326,44 @@ February–December: opening balance = prior month closing balance, read-only, a
 
 ```
 [blank / recorded]
-  ↓ User enters "Scheduled to be paid on [date]" in Notes/Memos
-[SCHEDULED ❗ red icon]
-  ↓ Scheduled date passes with no status update
-[IN-FLIGHT ❗ red icon + amber row tint + AI prompt]
+  ↓ User sets scheduled_date via Column J date picker
+[SCHEDULED ❗ red icon]  (status derived at save time; also restored at read time)
+  ↓ scheduled_date passes (system date > scheduled_date)
+[IN-FLIGHT ❗ red icon + amber row tint + tooltip]
   ↓ User marks as pending OR cleared (or AI suggests)
 [PENDING ⚠️]  OR  [CLEARED ✅]
   ↓ (if pending) Bank posts; user/AI confirms
 [CLEARED ✅]  ← final state
+
+User clears scheduled_date (clicks ×):
+  → If status was scheduled or in_flight → auto-reset to recorded
+  → Toast: "Scheduled date removed — status reset to recorded"
+  → If user had manually changed status (e.g. pending) → no auto-reset
 
 Any state → [VOID] via explicit user action + confirmation prompt
 VOID rows are excluded from all balance computations
 Audit entry created for every status transition
 ```
 
-### Scheduled Auto-Trigger Rule (Column E)
-- **Trigger:** Notes/Memos field (Column I) contains the text `"Scheduled to be paid on"` (case-insensitive)
-- **Action:** Column E automatically displays the red scheduled icon
-- **Behavior:** Reactive binding — fires in real time as user types; reverts if text is removed
-- **No user click required** for the scheduled icon to appear
-- Scheduled date is parsed from the notes text: `"Scheduled to be paid on MM/DD/YYYY"`
+### Scheduled Date Rule (Column J)
+- **Trigger:** User sets a date in the `scheduled_date` field (Column J) via the inline date picker
+- **Action:** Status is derived at save time — `scheduled` if date is today or future, `in_flight` if date has already passed
+- **Auto-restore on load:** If `status = 'recorded'` AND `scheduled_date IS NOT NULL` AND `scheduled_date >= today` → displayed as `scheduled` at read time (corrects stale DB state)
+- **Icon preview:** While editing, the scheduled icon appears in Column E as soon as a date is entered — no save required
+- **`scheduled_date` is the single source of truth** for all scheduling behavior. Notes/Memos (Column I) is now free text only and has no effect on status.
 
 ### In-Flight Transition Rule
-- **Trigger:** System date becomes the day after the parsed `scheduled_date`
-- **Action:** Row receives amber/orange visual tint; tooltip appears; AI prompt fires
+- **Trigger:** `scheduled_date` is set AND system date is after `scheduled_date`
+- **Action:** Row receives amber/orange visual tint; tooltip appears
 - **Tooltip text:** `"Payment date passed — awaiting bank confirmation"`
-- **AI prompt:** `"This scheduled payment's date has passed. Has it been processed? Mark as pending or confirm it cleared."`
 - **Icon:** Red scheduled icon remains — it is NOT removed
 - **No silent status change** — user is always informed, never surprised
+
+### Scheduled Date Clear Rule
+- **Trigger:** User clicks × to clear `scheduled_date`
+- **If status was `scheduled` or `in_flight`:** Status auto-resets to `recorded`; toast notification displayed for 4 seconds
+- **If user had manually set status** (e.g. `pending`, `cleared`) before clearing the date: status is respected — no auto-reset
+- Confirmation number and all other notes content is untouched
 
 ### Pending Status Rule
 - **Source:** Bank reports transaction as "in-process" or "incoming" during reconciliation
@@ -721,8 +732,8 @@ status          TEXT CHECK (status IN (
 debit           NUMERIC(12,2) CHECK (debit > 0)   -- mutually exclusive with credit
 credit          NUMERIC(12,2) CHECK (credit > 0)  -- mutually exclusive with debit
 -- balance column is NOT stored — always computed on read
-notes           TEXT
-scheduled_date  DATE              -- parsed from notes when scheduled auto-rule fires
+notes           TEXT              -- free text only: confirmation numbers, descriptions, user notes
+scheduled_date  DATE              -- user-set via Column J date picker; drives scheduled/in_flight status; single source of truth for all scheduling behavior
 created_at      TIMESTAMPTZ DEFAULT now()
 updated_at      TIMESTAMPTZ DEFAULT now()
 CONSTRAINT debit_credit_exclusive CHECK (
@@ -798,22 +809,22 @@ const isFullyReconciled =
 
 ### Layout — Register View
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Check Register — March 2026                    [Account Name]  │
-├─────────────────────────────────────────────────────────────────┤
-│  $3,247.43  Actual Balance                                      │
-│  $3,101.20  Available Balance                                   │
-├─────────────────────────────────────────────────────────────────┤
-│  ⚠️ Reconciliation needed  |  $146.23 gap  |  8 scheduled       │
-│     1 pending  |  0 unsynced                                     │
-├─────────────────────────────────────────────────────────────────┤
-│  [Check#] [Date] [Description──────────────] [S] [-] [+] [Bal] │
-│  ──────────────────────────────────────────────────────────── │
-│  rows...                                                         │
-├─────────────────────────────────────────────────────────────────┤
-│  [JAN] [FEB] [MAR*] [APR] [MAY] [JUN] [JUL]                    │
-│  [AUG] [SEP] [OCT] [NOV] [DEC] [YEARLY SUMMARY]                │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│  Check Register — March 2026                          [Account Name]      │
+├───────────────────────────────────────────────────────────────────────────┤
+│  $3,247.43  Actual Balance                                                │
+│  $3,101.20  Available Balance                                             │
+├───────────────────────────────────────────────────────────────────────────┤
+│  ⚠️ Reconciliation needed  |  $146.23 gap  |  8 scheduled                 │
+│     1 pending  |  0 unsynced                                               │
+├───────────────────────────────────────────────────────────────────────────┤
+│  [Check#] [Date] [Description──────] [S] [-] [+] [Bal] [Notes] [Sched.] │
+│  ───────────────────────────────────────────────────────────────────────  │
+│  rows...                                                                   │
+├───────────────────────────────────────────────────────────────────────────┤
+│  [JAN] [FEB] [MAR*] [APR] [MAY] [JUN] [JUL]                              │
+│  [AUG] [SEP] [OCT] [NOV] [DEC] [YEARLY SUMMARY]                          │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Header — Balance Display (Phase 1)
@@ -852,6 +863,15 @@ When reconciled (all non-void transactions cleared):
 - Autosave on blur (clicking away from cell)
 - Debit and credit fields disable each other reactively
 
+### Sched. Date Field (Column J)
+- **Edit mode:** HTML date picker input; narrow column (date only, no label text)
+- **Clear button:** × appears next to the input when a date is set; `onMouseDown` clears the field without triggering blur-save prematurely
+- **Read mode:** Formatted date (`MM/DD/YYYY`) if set; empty cell if null
+- **Tab order (new row):** Notes → Sched. Date → Save (Tab/Enter on Sched. Date submits the row)
+- **Tab order (edit row):** Notes → Sched. Date → blur triggers autosave
+- **Status icon preview:** Scheduled icon appears in Column E while editing as soon as a date is typed — no save required
+- **Status dropdown:** `Scheduled` option appears in the dropdown only when `scheduled_date IS NOT NULL`; hidden when null (no date = no scheduled state possible)
+
 ### Month Navigation
 - Tab bar at bottom of register: January through December + Yearly Summary
 - Current month highlighted/underlined
@@ -885,7 +905,8 @@ All entries are read-only.
 | Credit | Positive decimal, max 2 decimal places; cannot coexist with Debit |
 | Check # | Positive integer only; optional |
 | At least one of Debit/Credit | Row must have either debit or credit to compute balance |
-| Notes trigger | If Notes contains "Scheduled to be paid on", status auto-sets to `scheduled` |
+| Notes | Free text; no format constraints; no effect on status |
+| Sched. Date | Optional; valid date; stored as `YYYY-MM-DD`; drives `scheduled`/`in_flight` status on save |
 
 ### Balance Validation
 | Rule |
@@ -1034,7 +1055,7 @@ Bank sync is an **optional enhancement** for reconciliation assistance. It is no
 2. Debit and credit are **mutually exclusive** per row — enforced at DB and UI layers
 3. Opening balance is **read-only** after being set (except manual unlock)
 4. Carry-forward is **one rule**: prior month last balance → current month opening
-5. Scheduled icon is **auto-triggered** by Notes/Memos text — no user click needed
+5. Scheduled icon is **auto-triggered** by `scheduled_date` (Column J) — `scheduled_date` is the single source of truth; Notes/Memos is free text only
 6. **Nothing changes silently** — AI suggests, user confirms, always
 7. Audit log is **append-only** — no modifications or deletions, ever
 8. Routing and account numbers are **encrypted at rest** and **masked in UI**

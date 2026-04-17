@@ -28,8 +28,11 @@ function todayDisplay(today: Date): string {
  */
 function daysPastScheduled(scheduledDateIso: string | null, today: Date): number | null {
   if (!scheduledDateIso) return null
-  const scheduled = new Date(scheduledDateIso)
-  scheduled.setHours(0, 0, 0, 0)
+  // Strip any time/timezone suffix, then parse components directly so the date
+  // is always interpreted as local midnight — never shifted by UTC offset.
+  const [y, m, d] = scheduledDateIso.split('T')[0].split('-').map(Number)
+  if (!y || !m || !d) return null
+  const scheduled = new Date(y, m - 1, d)
   const todayMidnight = new Date(today)
   todayMidnight.setHours(0, 0, 0, 0)
   const diffMs = todayMidnight.getTime() - scheduled.getTime()

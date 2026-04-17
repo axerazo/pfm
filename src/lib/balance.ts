@@ -106,8 +106,8 @@ export function computeClosingBalance(
 }
 
 /**
- * Detect whether a notes string triggers the scheduled auto-rule.
- * Trigger phrase (case-insensitive): "Scheduled to be paid on"
+ * @deprecated DO NOT USE — scheduled_date column is now the single source of truth.
+ * Kept only for backwards compatibility during migration. Will be removed.
  */
 export function detectScheduledPhrase(notes: string | null | undefined): boolean {
   if (!notes) return false
@@ -115,9 +115,8 @@ export function detectScheduledPhrase(notes: string | null | undefined): boolean
 }
 
 /**
- * Parse the scheduled date from notes text.
- * Expected format: "Scheduled to be paid on MM/DD/YYYY"
- * Returns ISO date string (YYYY-MM-DD) or null if not parseable.
+ * @deprecated DO NOT USE — scheduled_date column is now the single source of truth.
+ * Kept only for backwards compatibility during migration. Will be removed.
  */
 export function parseScheduledDate(notes: string | null | undefined): string | null {
   if (!notes) return null
@@ -137,10 +136,13 @@ export function parseScheduledDate(notes: string | null | undefined): string | n
  */
 export function isInFlight(scheduledDate: string | null | undefined): boolean {
   if (!scheduledDate) return false
+  // Strip any time/timezone suffix, then parse components directly so the date
+  // is always interpreted as local midnight — never shifted by UTC offset.
+  const [y, m, d] = scheduledDate.split('T')[0].split('-').map(Number)
+  if (!y || !m || !d) return false
+  const scheduled = new Date(y, m - 1, d)
   const today = new Date()
   today.setHours(0, 0, 0, 0)
-  const scheduled = new Date(scheduledDate)
-  scheduled.setHours(0, 0, 0, 0)
   return scheduled < today
 }
 
