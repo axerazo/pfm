@@ -435,6 +435,18 @@ Every register has a `month_status` field that tracks its lifecycle:
 - `soft_closed` → `hard_closed`: automatic when the next sequential month transitions to `soft_closed`
 - `hard_closed` → editable session: existing unlock dialog + full audit log (existing flow, preserved)
 
+### Month Register Creation
+
+Month registers are **user-created entities** — the system does not preemptively create future-month registers based on calendar rollover. A register for a given month comes into existence only when the user navigates to that month tab for the first time and confirms initialization.
+
+Two creation paths exist:
+
+**Path 1 — Calendar-natural:** The user creates a register on or after that month has begun (the prior month is in the past). Opening balance is auto-populated from the prior month's last cleared running balance using the formula below. No manual entry required.
+
+**Path 2 — Early creation:** The user creates a register before that month has begun (e.g., creating May while April is still active). Because the prior month has not yet closed out, the system cannot reliably derive a final opening balance automatically. The Initialize modal prompts the user to enter a manual opening balance — typically the current Actual Balance shown in the prior month at that moment.
+
+Both paths produce a register with a valid opening balance, ready for entries. Regardless of which path was used, the carry-forward update rule below governs all subsequent silent opening balance changes.
+
 ### Opening Balance Carry-Forward Rule (Revised)
 
 Next month's `opening_balance` = the running balance at the last **cleared** transaction in the prior month, computed by iterating transactions in `row_order` sequence. Running balance includes all non-void transactions; the "snapshot" is recorded each time a cleared transaction is encountered.
@@ -442,6 +454,8 @@ Next month's `opening_balance` = the running balance at the last **cleared** tra
 This updates **silently** (no prompt) whenever any transaction in the prior month changes status. Guards:
 - Never updates a locked (`is_locked = true`) next month
 - Never updates when the source month is `soft_closed` or `hard_closed`
+
+For Path 1 (calendar-natural), this formula also determines the opening balance at the moment the register is created. For Path 2 (early creation), the Initialize modal value is used at creation time and this formula governs only subsequent silent updates.
 
 ### Close & Archive Flow
 
@@ -486,7 +500,7 @@ There is no intermediate "acknowledged but not yet archived" suppression state. 
 ### Locking Rules
 - The **current month** is always editable
 - **Past months** are locked by default (read-only)
-- **Future months** are read-only until they become the current month
+- **Future months** have no register until the user creates one; once created via the Initialize modal (§11), the month is editable like any other `month_status = 'open'` month — no lock, no unlock flow required
 
 ### Unlocking a Locked Month
 1. User navigates to a past month
@@ -876,7 +890,7 @@ When reconciled (all non-void transactions cleared):
 - Tab bar at bottom of register: January through December + Yearly Summary
 - Current month highlighted/underlined
 - Past months show lock icon 🔒 on hover
-- Future months are accessible (for pre-entry of scheduled items) but show no lock
+- Future month tabs are accessible (for pre-entry of scheduled items) and show no lock icon; navigating to a future month with no existing register triggers the Initialize modal to create one
 
 ### Locked Month Banner
 ```

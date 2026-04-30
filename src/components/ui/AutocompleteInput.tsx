@@ -42,13 +42,18 @@ interface AutocompleteInputProps extends React.InputHTMLAttributes<HTMLInputElem
 
 export const AutocompleteInput = forwardRef<HTMLInputElement, AutocompleteInputProps>(
   function AutocompleteInput(
-    { suggestions, onAccept, onKeyDown, value, className, ...rest },
+    { suggestions, onAccept, onKeyDown, onChange, value, className, ...rest },
     ref,
   ) {
     const [activeIdx, setActiveIdx] = useState(-1)
     const [isOpen,    setIsOpen]    = useState(false)
     const [upward,    setUpward]    = useState(false)
     const [maxH,      setMaxH]      = useState(DROPDOWN_MAX)
+
+    // Set to true by accept(); cleared by handleChange (user typing).
+    // Prevents the suggestions useEffect from re-opening the dropdown after
+    // a selection causes the query to change and fetch new suggestions.
+    const justAcceptedRef = useRef(false)
 
     const containerRef = useRef<HTMLDivElement>(null)
 
@@ -59,6 +64,14 @@ export const AutocompleteInput = forwardRef<HTMLInputElement, AutocompleteInputP
       if (suggestions.length === 0) {
         setIsOpen(false)
         setActiveIdx(-1)
+        return
+      }
+
+      // After accept(), the accepted value changes the query → new suggestions
+      // arrive. Block those from re-opening the dropdown; only clear when the
+      // user starts typing again (handleChange resets justAcceptedRef).
+      if (justAcceptedRef.current) {
+        setIsOpen(false)
         return
       }
 
@@ -97,7 +110,13 @@ export const AutocompleteInput = forwardRef<HTMLInputElement, AutocompleteInputP
       return () => document.removeEventListener('mousedown', onOutsideClick)
     }, [isOpen])
 
+    function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+      justAcceptedRef.current = false
+      onChange?.(e)
+    }
+
     function accept(val: string) {
+      justAcceptedRef.current = true
       setIsOpen(false)
       setActiveIdx(-1)
       onAccept(val)
@@ -161,6 +180,7 @@ export const AutocompleteInput = forwardRef<HTMLInputElement, AutocompleteInputP
         <input
           ref={ref}
           value={value}
+          onChange={handleChange}
           onKeyDown={handleKeyDown}
           onBlur={() => { setIsOpen(false); setActiveIdx(-1) }}
           className={className}
