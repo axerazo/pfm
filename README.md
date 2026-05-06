@@ -1,5 +1,7 @@
 # Digital Check Register
 
+<b>Summary:</b> A personal project demonstrating ledger-first design, AI-assisted reconciliation, and human-in-the-loop AI engineering. Built collaboratively with Claude Code.
+
 A ledger-first personal finance tool with AI-assisted reconciliation.
 
 > **Status:** Active development, personal project. Not deployed. Not production-ready.
